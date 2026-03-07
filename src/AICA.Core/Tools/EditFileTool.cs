@@ -11,7 +11,7 @@ namespace AICA.Core.Tools
     public class EditFileTool : IAgentTool
     {
         public string Name => "edit";
-        public string Description => "Make a precise edit to an existing file by replacing a unique string with new content, or completely replace the file content.";
+        public string Description => "Edit an EXISTING file by replacing text. CRITICAL: The old_string must match EXACTLY (including all whitespace, line breaks, and indentation). Use read_file first to see the exact content. Set full_replace=true to replace entire file content.";
 
         public ToolDefinition GetDefinition()
         {
@@ -169,7 +169,16 @@ namespace AICA.Core.Tools
             var result = await context.ShowDiffAndApplyAsync(path, content, newContent, ct);
 
             if (!result.Applied)
-                return ToolResult.Fail("Operation cancelled by user or diff view was closed without applying changes.");
+            {
+                var currentContent = await context.ReadFileAsync(path, ct);
+                return ToolResult.Ok(
+                    $"EDIT CANCELLED BY USER - NO CHANGES WERE APPLIED\n\n" +
+                    $"File: {path}\n\n" +
+                    $"The user chose not to apply the proposed edit. Respect this decision and do NOT retry the same edit automatically unless the user explicitly asks you to try again.\n\n" +
+                    $"CURRENT FILE CONTENT (unchanged after cancellation):\n{currentContent}\n\n" +
+                    $"Next step: Explain that the edit was cancelled, analyze the current file state if helpful, and continue the task based on the unchanged file content."
+                );
+            }
 
             // Read the actual saved content (user may have modified it in the diff view)
             var finalContent = await context.ReadFileAsync(path, ct);

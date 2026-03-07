@@ -15,7 +15,7 @@ namespace AICA.Core.Tools
     public class RunCommandTool : IAgentTool
     {
         public string Name => "run_command";
-        public string Description => "Execute a terminal command in the workspace directory. Dangerous commands require user approval.";
+        public string Description => "Execute a terminal/shell command (e.g., 'dotnet build', 'git status', 'npm install'). Returns stdout, stderr, and exit code. Commands require user approval. Use timeout_seconds parameter for long-running commands.";
 
         /// <summary>
         /// Optional external command safety checker (injected by VS layer)

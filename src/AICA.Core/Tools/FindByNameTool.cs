@@ -15,7 +15,7 @@ namespace AICA.Core.Tools
     public class FindByNameTool : IAgentTool
     {
         public string Name => "find_by_name";
-        public string Description => "Search for files and directories by name pattern (glob) within the workspace.";
+        public string Description => "Search for files or directories by name pattern. Use glob patterns like '*.cs' or partial names. Returns matching file/directory paths with size information. Use this when you know the file name but not its location.";
 
         public ToolDefinition GetDefinition()
         {

@@ -62,11 +62,13 @@ namespace AICA.Core.LLM
             var requestJson = JsonSerializer.Serialize(request, _jsonOptions);
 
             _logger?.LogDebug("LLM Request: {Request}", requestJson);
-            
-            // Write debug info for diagnostics
+
+            // Enhanced debug info for MiniMax API diagnostics
             System.Diagnostics.Debug.WriteLine($"[AICA] LLM Request URL: {GetChatEndpoint()}");
+            System.Diagnostics.Debug.WriteLine($"[AICA] Model: {request.Model}");
             System.Diagnostics.Debug.WriteLine($"[AICA] Tools count: {request.Tools?.Count ?? 0}");
             System.Diagnostics.Debug.WriteLine($"[AICA] tool_choice: {request.ToolChoice ?? "(null)"}");
+            System.Diagnostics.Debug.WriteLine($"[AICA] Messages count: {request.Messages?.Count ?? 0}");
             if (requestJson.Length < 5000)
                 System.Diagnostics.Debug.WriteLine($"[AICA] Request JSON: {requestJson}");
             else
@@ -100,7 +102,16 @@ namespace AICA.Core.LLM
             {
                 var errorContent = await response.Content.ReadAsStringAsync();
                 _logger?.LogError("LLM API error: {StatusCode} - {Content}", response.StatusCode, errorContent);
-                throw new LLMException($"LLM API returned {response.StatusCode}: {errorContent}", (int)response.StatusCode);
+
+                // Enhanced error message for MiniMax-specific errors
+                string errorMessage = $"LLM API returned {response.StatusCode}: {errorContent}";
+                if (errorContent.Contains("does not exist") && errorContent.Contains("model"))
+                {
+                    errorMessage += "\n\nHint: Please check if the model name is correct in your configuration. " +
+                                   "For MiniMax-M2.5, ensure the model name matches exactly what the API expects.";
+                }
+
+                throw new LLMException(errorMessage, (int)response.StatusCode);
             }
 
             if (_options.Stream)
@@ -590,7 +601,7 @@ namespace AICA.Core.LLM
 
         /// <summary>
         /// Whether this error indicates the context window was exceeded.
-        /// Detects patterns from OpenAI, vLLM, ollama, LM Studio, etc.
+        /// Detects patterns from OpenAI, vLLM, ollama, LM Studio, MiniMax, etc.
         /// </summary>
         public bool IsContextExceeded =>
             StatusCode == 400 &&
@@ -600,7 +611,9 @@ namespace AICA.Core.LLM
              Message.Contains("token limit") ||
              Message.Contains("max_tokens") ||
              Message.Contains("too long") ||
-             Message.Contains("exceeds the model"));
+             Message.Contains("exceeds the model") ||
+             Message.Contains("上下文长度") ||
+             Message.Contains("令牌限制"));
 
         /// <summary>
         /// Whether this error is transient and worth retrying (server errors, timeouts).

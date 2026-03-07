@@ -92,12 +92,15 @@ namespace AICA.Core.Prompt
             _builder.AppendLine();
             _builder.AppendLine("### MANDATORY: Task Completion");
             _builder.AppendLine("- **YOU MUST CALL `attempt_completion` AFTER EVERY TASK.** This is NOT optional.");
+            _builder.AppendLine("- **DO NOT mention internal tool decisions to the user.** Never write text like 'I should call attempt_completion', 'I will call a tool now', '我应该调用 attempt_completion', or similar meta-reasoning. Only present user-facing results.");
             _builder.AppendLine("- Tasks that require `attempt_completion`:");
             _builder.AppendLine("  - Creating any file (write_to_file)");
             _builder.AppendLine("  - Editing any file (edit)");
             _builder.AppendLine("  - Completing any user request that involves code/file operations");
             _builder.AppendLine("  - Finishing any analysis or investigation");
+            _builder.AppendLine("  - Answering any user question (after providing the answer)");
             _builder.AppendLine("- **DO NOT just write a summary in text.** You MUST call the tool.");
+            _builder.AppendLine("- **CRITICAL: DO NOT ask follow-up questions like 'Do you want me to implement this?' or 'Need help with anything else?' at the end of your response.** Just call attempt_completion with your results. If the user wants more, they will ask in a new message.");
             _builder.AppendLine("- The `attempt_completion` tool parameters:");
             _builder.AppendLine("  - `result`: A comprehensive summary of what was accomplished");
             _builder.AppendLine("  - `command`: (Optional) A command to verify or test the result (e.g., 'dotnet build', 'make', 'g++ -o program main.cpp')");
@@ -124,6 +127,7 @@ namespace AICA.Core.Prompt
             _builder.AppendLine("- `list_dir`: Use for file system directory listings. Use `recursive=true` when the user asks for 'full structure', 'complete tree', '完整结构', '目录树' etc. Set `max_depth` to control depth (default 3, max 10). DO NOT use this for project/solution queries.");
             _builder.AppendLine("- `list_code_definition_names`: Use this to understand code structure (classes, methods, properties) without reading entire files. Ideal for code structure overview requests.");
             _builder.AppendLine("- `grep_search`: Prefer this over `read_file` when looking for specific patterns across multiple files.");
+            _builder.AppendLine("- `read_file`: Supports reading large files in chunks using `offset` and `limit` parameters. **CRITICAL: If you read a file with offset/limit and the content appears truncated, continue reading by calling read_file again with the next offset until you have the complete content needed for your task.** Do NOT tell the user 'the file was truncated' and stop - keep reading until you have enough information.");
             _builder.AppendLine("- `edit`: Always `read_file` first. The `old_string` must exactly match file content and be unique.");
             _builder.AppendLine();
 
@@ -131,6 +135,7 @@ namespace AICA.Core.Prompt
             _builder.AppendLine("### Code Editing");
             _builder.AppendLine("- ALWAYS read a file with `read_file` before editing it.");
             _builder.AppendLine("- Use `edit` for precise, targeted changes. The `old_string` must exactly match the file content (including whitespace and indentation) and must be unique in the file.");
+            _builder.AppendLine("- **CRITICAL: If an edit preview/diff is rejected by the user (for example, they click 'No' or cancel the apply step), accept that decision. Do NOT retry the same edit automatically. Instead, explain that the edit was not applied, analyze the current file state, and continue based on the unchanged file unless the user explicitly asks you to try again.**");
             _builder.AppendLine("- **CRITICAL: When using `edit`, copy the exact text from the `read_file` output.** Pay attention to:");
             _builder.AppendLine("  - Indentation (spaces vs tabs)");
             _builder.AppendLine("  - Line endings");
@@ -175,6 +180,8 @@ namespace AICA.Core.Prompt
             _builder.AppendLine("- **IMPORTANT: Duplicate call prevention.** The system will reject duplicate tool calls (same tool + same arguments). If you need to re-read a file after editing it, the system will allow it automatically. Otherwise, use the previous result from your conversation history.");
             _builder.AppendLine("- **Stay focused.** Only explore directories and files directly relevant to the user's question. Do not wander into unrelated directories.");
             _builder.AppendLine("- **One search is usually enough.** For `grep_search`, one well-crafted query is better than multiple vague ones. Review the results before searching again.");
+            _builder.AppendLine("- **For grep_search with many expected results:** The default max_results is 200. If you expect more matches (e.g., searching for common patterns like 'class'), explicitly set a higher max_results value (e.g., 500 or 1000) to avoid truncation.");
+            _builder.AppendLine("- **IMPORTANT: When results are truncated, grep_search provides accurate per-file statistics.** Trust the per-file match counts in the tool output - do NOT manually count from truncated results as this will be inaccurate.");
             _builder.AppendLine("- After gathering sufficient information, call `attempt_completion` promptly. Do not keep searching for more data if you already have a good answer.");
             _builder.AppendLine();
 

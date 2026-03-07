@@ -12,7 +12,7 @@ namespace AICA.Core.Tools
     public class ReadFileTool : IAgentTool
     {
         public string Name => "read_file";
-        public string Description => "Read the contents of a file at the specified path.";
+        public string Description => "Read the contents of a file. Use this to view file content before making changes. Supports reading specific line ranges with offset and limit parameters.";
 
         public ToolDefinition GetDefinition()
         {

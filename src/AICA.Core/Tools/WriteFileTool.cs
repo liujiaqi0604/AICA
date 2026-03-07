@@ -11,7 +11,7 @@ namespace AICA.Core.Tools
     public class WriteFileTool : IAgentTool
     {
         public string Name => "write_to_file";
-        public string Description => "Create a new file with the specified content. Use this only for new files.";
+        public string Description => "Create a NEW file with content. IMPORTANT: Only use this for files that don't exist yet. For existing files, use the 'edit' tool instead. This will fail if the file already exists.";
 
         public ToolDefinition GetDefinition()
         {

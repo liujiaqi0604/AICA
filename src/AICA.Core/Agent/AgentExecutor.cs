@@ -278,6 +278,9 @@ namespace AICA.Core.Agent
                     {
                         System.Diagnostics.Debug.WriteLine($"[AICA] Parsed {parsedCalls.Count} text-based tool call(s) from response");
                         toolCalls.AddRange(parsedCalls);
+
+                        // Remove the text-based tool call syntax from assistantResponse to avoid leaking it
+                        assistantResponse = RemoveTextToolCallSyntax(assistantResponse);
                     }
                 }
 
@@ -298,15 +301,62 @@ namespace AICA.Core.Agent
                 }
 
                 // ── Hallucination suppression ──
-                // If text > 100 chars AND tool calls exist, suppress the hallucinated pre-tool text.
-                // Exception: when attempt_completion is among the tool calls, the text is the
-                // actual final response and must NOT be suppressed.
-                // NOTE: We do NOT suppress text when there are no tool calls. For knowledge
-                // questions (e.g. "explain SOLID principles"), the text IS the real answer.
+                // If the model is going to call tools, pre-tool text is often planning/thinking text
+                // rather than user-facing content.
+                // For attempt_completion, suppress ALL pre-tool text because the final user-facing
+                // response should come from the completion summary, not internal tool-decision text.
+                // For other tools, only suppress if the text looks like internal reasoning.
                 bool hasAttemptCompletion = toolCalls.Any(tc => tc.Name == "attempt_completion");
-                bool suppressText = hasToolCalls && !hasAttemptCompletion &&
-                    !string.IsNullOrEmpty(assistantResponse) &&
-                    assistantResponse.Length > 100;
+                bool suppressText = false;
+
+                if (hasToolCalls && !string.IsNullOrWhiteSpace(assistantResponse))
+                {
+                    // Always suppress pre-tool text for attempt_completion
+                    if (hasAttemptCompletion)
+                    {
+                        suppressText = true;
+                    }
+                    // For other tools, check if the text looks like internal reasoning
+                    else
+                    {
+                        var lowerResponse = assistantResponse.ToLowerInvariant();
+
+                        // Patterns indicating internal reasoning/planning (not user-facing content)
+                        var reasoningPatterns = new[]
+                        {
+                            "i need to", "i should", "i will", "i'm going to", "let me",
+                            "我需要", "我应该", "我将", "让我",
+                            "first, i", "next, i", "then, i",
+                            "首先", "接下来", "然后"
+                        };
+
+                        // If text is short and starts with reasoning patterns, it's likely planning text
+                        if (assistantResponse.Length < 200 && reasoningPatterns.Any(p => lowerResponse.StartsWith(p)))
+                        {
+                            suppressText = true;
+                        }
+                    }
+                }
+
+                // Additional filter: suppress common meta-reasoning patterns that leak internal thinking
+                if (!suppressText && !string.IsNullOrWhiteSpace(assistantResponse))
+                {
+                    var lowerResponse = assistantResponse.ToLowerInvariant();
+                    var metaPatterns = new[]
+                    {
+                        "the user is asking", "the user wants", "the user is requesting",
+                        "looking at the instructions", "actually,", "wait,", "let me check",
+                        "i think the user", "let me re-read",
+                        "oh wait", "i see -", "this might be"
+                    };
+
+                    if (metaPatterns.Any(p => lowerResponse.Contains(p)))
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[AICA] Suppressing meta-reasoning text ({assistantResponse?.Length ?? 0} chars)");
+                        suppressText = true;
+                    }
+                }
 
                 if (suppressText)
                 {
@@ -364,6 +414,26 @@ namespace AICA.Core.Agent
                     if (wasTruncated)
                     {
                         conversationHistory.Add(ChatMessage.User("[System: Your response was cut off due to token limit. Please continue from where you left off.]"));
+                        continue;
+                    }
+
+                    // ── Hallucination detection ──
+                    // Detect if the model claims to have executed a tool but didn't actually call it
+                    if (!string.IsNullOrWhiteSpace(assistantResponse) && DetectToolExecutionClaim(assistantResponse))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[AICA] Detected tool execution hallucination - model claimed to execute a tool but didn't call it");
+
+                        // Yield the hallucinated text first (so user can see what happened)
+                        // Already yielded via pendingTextChunks above
+
+                        // Add a strong correction message
+                        conversationHistory.Add(ChatMessage.User(
+                            "⚠️ CRITICAL ERROR: You described executing a tool but did NOT actually call it. " +
+                            "You MUST use the proper tool calling format to execute tools. " +
+                            "Do NOT just describe what you would do - ACTUALLY CALL THE TOOL using the function calling mechanism. " +
+                            "Please retry the operation by making the actual tool call now."));
+
+                        System.Diagnostics.Debug.WriteLine($"[AICA] Added hallucination correction message");
                         continue;
                     }
 
@@ -517,6 +587,14 @@ namespace AICA.Core.Agent
                         resultContent = resultContent.Substring(0, 4000) + "\n... (truncated, total length: " + resultContent.Length + " chars)";
                     }
                     conversationHistory.Add(ChatMessage.ToolResult(toolCall.Id, resultContent));
+
+                    // If the user explicitly rejected an edit, stop retrying the same edit path.
+                    // Treat this as valid user feedback, not as an execution error.
+                    if (toolCall.Name == "edit" && result.Success &&
+                        result.Content != null && result.Content.Contains("EDIT CANCELLED BY USER - NO CHANGES WERE APPLIED"))
+                    {
+                        _taskState.DidRejectTool = true;
+                    }
                 }
 
                 // ── Check if task should be completed ──
@@ -632,7 +710,114 @@ namespace AICA.Core.Agent
                 }
             }
 
-            // Pattern 2: JSON-style tool calls in text
+            // Pattern 2: minimax:tool_call format
+            // MiniMax model outputs tool calls without explicit tool name, need to infer from context
+            // Format: minimax:tool_call\n\n<content>\n\n</minimax:tool_call>
+            if (result.Count == 0)
+            {
+                var minimaxPattern = new Regex(
+                    @"minimax:tool_call\s+(.*?)\s*</minimax:tool_call>",
+                    RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                foreach (Match match in minimaxPattern.Matches(text))
+                {
+                    var content = match.Groups[1].Value.Trim();
+
+                    // Skip empty matches
+                    if (string.IsNullOrWhiteSpace(content))
+                    {
+                        System.Diagnostics.Debug.WriteLine("[AICA] Skipping empty minimax:tool_call match");
+                        continue;
+                    }
+
+                    var lines = content.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+
+                    if (lines.Length == 0)
+                    {
+                        System.Diagnostics.Debug.WriteLine("[AICA] No lines found in minimax:tool_call content");
+                        continue;
+                    }
+
+                    // Infer tool name from content
+                    string toolName = null;
+                    var args = new Dictionary<string, object>();
+
+                    var firstLine = lines[0].Trim();
+                    System.Diagnostics.Debug.WriteLine($"[AICA] Parsing minimax:tool_call with first line: {firstLine}");
+
+                    // Check if first line looks like a command
+                    if (firstLine.StartsWith("dotnet ") || firstLine.StartsWith("msbuild ") ||
+                        firstLine.StartsWith("git ") || firstLine.StartsWith("npm ") ||
+                        firstLine.StartsWith("make ") || firstLine.Contains(".exe") ||
+                        firstLine.Contains("&&") || firstLine.Contains("|"))
+                    {
+                        toolName = "run_command";
+                        args["command"] = firstLine;
+                        if (lines.Length > 1 && int.TryParse(lines[1].Trim(), out var timeout))
+                        {
+                            args["timeout"] = timeout;
+                        }
+                        System.Diagnostics.Debug.WriteLine($"[AICA] Inferred tool: run_command");
+                    }
+                    // Check if it looks like a file path
+                    else if (firstLine.Contains("/") || firstLine.Contains("\\") || firstLine.Contains("."))
+                    {
+                        // Could be read_file, list_dir, or find_by_name
+                        // Default to read_file if it looks like a file
+                        if (firstLine.EndsWith(".cs") || firstLine.EndsWith(".txt") ||
+                            firstLine.EndsWith(".json") || firstLine.EndsWith(".xml") ||
+                            firstLine.EndsWith(".md") || firstLine.EndsWith(".cpp") ||
+                            firstLine.EndsWith(".h") || firstLine.EndsWith(".py") ||
+                            firstLine.EndsWith(".js") || firstLine.EndsWith(".ts") ||
+                            firstLine.EndsWith(".java") || firstLine.EndsWith(".go"))
+                        {
+                            toolName = "read_file";
+                            args["path"] = firstLine;
+                            if (lines.Length > 1 && int.TryParse(lines[1].Trim(), out var offset))
+                            {
+                                args["offset"] = offset;
+                            }
+                            if (lines.Length > 2 && int.TryParse(lines[2].Trim(), out var limit))
+                            {
+                                args["limit"] = limit;
+                            }
+                            System.Diagnostics.Debug.WriteLine($"[AICA] Inferred tool: read_file, path: {firstLine}");
+                        }
+                        else
+                        {
+                            toolName = "list_dir";
+                            args["path"] = firstLine;
+                            System.Diagnostics.Debug.WriteLine($"[AICA] Inferred tool: list_dir");
+                        }
+                    }
+                    // Otherwise treat as grep_search query
+                    else
+                    {
+                        toolName = "grep_search";
+                        args["query"] = firstLine;
+                        if (lines.Length > 1) args["path"] = lines[1].Trim();
+                        if (lines.Length > 2) args["includes"] = lines[2].Trim();
+                        System.Diagnostics.Debug.WriteLine($"[AICA] Inferred tool: grep_search");
+                    }
+
+                    if (!string.IsNullOrEmpty(toolName) && args.Count > 0)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[AICA] Successfully parsed minimax:tool_call as {toolName}");
+                        result.Add(new ToolCall
+                        {
+                            Id = "text_" + Guid.NewGuid().ToString("N").Substring(0, 8),
+                            Name = toolName,
+                            Arguments = args
+                        });
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[AICA] Failed to parse minimax:tool_call - toolName: {toolName}, args count: {args.Count}");
+                    }
+                }
+            }
+
+            // Pattern 3: JSON-style tool calls in text
             if (result.Count == 0)
             {
                 var jsonPattern = new Regex(
@@ -662,6 +847,81 @@ namespace AICA.Core.Agent
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Remove text-based tool call syntax from response to avoid leaking it to the user.
+        /// Removes patterns like <function=...>...</tool_call> and minimax:tool_call tags.
+        /// </summary>
+        private static string RemoveTextToolCallSyntax(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return text;
+
+            // Remove <function=NAME>...</tool_call> patterns
+            text = Regex.Replace(text, @"<function=\w+>.*?</tool_call>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            // Remove minimax:tool_call patterns (with or without angle brackets)
+            // Use the same pattern as parsing to ensure consistency
+            text = Regex.Replace(text, @"minimax:tool_call\s+.*?\s*</minimax:tool_call>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            // Pattern 2: <minimax:tool_call>...</minimax:tool_call>
+            text = Regex.Replace(text, @"<minimax:tool_call>.*?</minimax:tool_call>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            // Clean up excess whitespace
+            text = Regex.Replace(text, @"\n{3,}", "\n\n", RegexOptions.None);
+            text = text.Trim();
+
+            return text;
+        }
+
+        /// <summary>
+        /// Detect if the model claims to have executed a tool but didn't actually call it.
+        /// This is a common hallucination pattern where the model describes what it "did"
+        /// instead of actually calling the tool.
+        /// </summary>
+        private static bool DetectToolExecutionClaim(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            var lowerText = text.ToLowerInvariant();
+
+            // Patterns indicating the model claims to have executed something
+            var executionClaimPatterns = new[]
+            {
+                // English patterns
+                "i have executed", "i've executed", "i executed",
+                "i have run", "i've run", "i ran",
+                "i have called", "i've called", "i called",
+                "already executed", "already run", "already called",
+                "the command has been", "command was executed",
+                "successfully executed", "execution complete",
+
+                // Chinese patterns
+                "已执行", "已运行", "已调用",
+                "执行了", "运行了", "调用了",
+                "执行完成", "运行完成",
+                "成功执行", "成功运行",
+
+                // Result presentation patterns (claiming to show results without actually getting them)
+                "here are the results", "here is the result",
+                "the results are", "the result is",
+                "结果如下", "结果为", "结果是",
+                "以下是结果", "查看结果"
+            };
+
+            // Check if text contains execution claims
+            bool hasExecutionClaim = executionClaimPatterns.Any(p => lowerText.Contains(p));
+
+            // Additional check: if text contains structured output that looks like tool results
+            // (tables, formatted data) but no actual tool was called
+            bool hasStructuredOutput =
+                (lowerText.Contains("exit code:") || lowerText.Contains("stdout:") || lowerText.Contains("stderr:")) ||
+                (lowerText.Contains("状态") && lowerText.Contains("文件")) ||
+                (text.Contains("|") && text.Contains("---")); // Markdown table
+
+            return hasExecutionClaim || hasStructuredOutput;
         }
 
         /// <summary>

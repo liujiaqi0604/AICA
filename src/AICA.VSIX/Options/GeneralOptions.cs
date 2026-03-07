@@ -25,9 +25,9 @@ namespace AICA.Options
 
         [Category("LLM Configuration")]
         [DisplayName("Model Name")]
-        [Description("The model identifier to use (e.g., qwen3-coder, deepseek-coder)")]
-        [DefaultValue("qwen3-coder")]
-        public string ModelName { get; set; } = "qwen3-coder";
+        [Description("The model identifier to use (e.g., MiniMax-M2.5, qwen3-coder, deepseek-coder)")]
+        [DefaultValue("MiniMax-M2.5")]
+        public string ModelName { get; set; } = "MiniMax-M2.5";
 
         [Category("LLM Configuration")]
         [DisplayName("Max Tokens")]

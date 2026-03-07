@@ -43,19 +43,26 @@ namespace AICA.Core.Agent
         /// </summary>
         public string Serialize()
         {
-            var parts = new System.Collections.Generic.List<string>
-            {
-                $"SUMMARY:{Summary}"
-            };
+            // Use a more robust serialization format that handles special characters
+            // Format: TASK_COMPLETED:SUMMARY_START<summary>SUMMARY_END|COMMAND:<command>|TIMESTAMP:<timestamp>
+            var sb = new System.Text.StringBuilder();
+            sb.Append("TASK_COMPLETED:");
+
+            // Wrap summary in delimiters to preserve content with special characters
+            sb.Append("SUMMARY_START");
+            sb.Append(Summary ?? string.Empty);
+            sb.Append("SUMMARY_END");
 
             if (!string.IsNullOrWhiteSpace(Command))
             {
-                parts.Add($"COMMAND:{Command}");
+                sb.Append("|COMMAND:");
+                sb.Append(Command);
             }
 
-            parts.Add($"TIMESTAMP:{Timestamp:O}");
+            sb.Append("|TIMESTAMP:");
+            sb.Append(Timestamp.ToString("O"));
 
-            return "TASK_COMPLETED:" + string.Join("|", parts);
+            return sb.ToString();
         }
 
         /// <summary>
@@ -68,32 +75,65 @@ namespace AICA.Core.Agent
 
             var result = new CompletionResult();
             var content = serialized.Substring("TASK_COMPLETED:".Length);
-            var parts = content.Split('|');
 
-            foreach (var part in parts)
+            // Extract summary using delimiters
+            var summaryStartIdx = content.IndexOf("SUMMARY_START");
+            var summaryEndIdx = content.IndexOf("SUMMARY_END");
+
+            if (summaryStartIdx >= 0 && summaryEndIdx > summaryStartIdx)
             {
-                if (part.StartsWith("SUMMARY:"))
+                var summaryStart = summaryStartIdx + "SUMMARY_START".Length;
+                result.Summary = content.Substring(summaryStart, summaryEndIdx - summaryStart);
+
+                // Parse remaining fields after SUMMARY_END
+                var remainingContent = content.Substring(summaryEndIdx + "SUMMARY_END".Length);
+                var parts = remainingContent.Split('|');
+
+                foreach (var part in parts)
                 {
-                    result.Summary = part.Substring("SUMMARY:".Length);
-                }
-                else if (part.StartsWith("COMMAND:"))
-                {
-                    result.Command = part.Substring("COMMAND:".Length);
-                }
-                else if (part.StartsWith("TIMESTAMP:"))
-                {
-                    var timestampStr = part.Substring("TIMESTAMP:".Length);
-                    if (DateTime.TryParse(timestampStr, out var timestamp))
+                    if (part.StartsWith("COMMAND:"))
                     {
-                        result.Timestamp = timestamp;
+                        result.Command = part.Substring("COMMAND:".Length);
+                    }
+                    else if (part.StartsWith("TIMESTAMP:"))
+                    {
+                        var timestampStr = part.Substring("TIMESTAMP:".Length);
+                        if (DateTime.TryParse(timestampStr, out var timestamp))
+                        {
+                            result.Timestamp = timestamp;
+                        }
                     }
                 }
             }
-
-            // Fallback: if no SUMMARY found, treat entire content as summary
-            if (string.IsNullOrEmpty(result.Summary))
+            else
             {
-                result.Summary = content;
+                // Fallback for old format or malformed data
+                var parts = content.Split('|');
+                foreach (var part in parts)
+                {
+                    if (part.StartsWith("SUMMARY:"))
+                    {
+                        result.Summary = part.Substring("SUMMARY:".Length);
+                    }
+                    else if (part.StartsWith("COMMAND:"))
+                    {
+                        result.Command = part.Substring("COMMAND:".Length);
+                    }
+                    else if (part.StartsWith("TIMESTAMP:"))
+                    {
+                        var timestampStr = part.Substring("TIMESTAMP:".Length);
+                        if (DateTime.TryParse(timestampStr, out var timestamp))
+                        {
+                            result.Timestamp = timestamp;
+                        }
+                    }
+                }
+
+                // If still no summary, treat entire content as summary
+                if (string.IsNullOrEmpty(result.Summary))
+                {
+                    result.Summary = content;
+                }
             }
 
             return result;

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -15,7 +16,7 @@ namespace AICA.Core.Tools
     public class GrepSearchTool : IAgentTool
     {
         public string Name => "grep_search";
-        public string Description => "Search for a text pattern (regex or fixed string) in files within the workspace.";
+        public string Description => "Search for text patterns in files. Use this to find code, functions, classes, or specific text across the codebase. Supports regex patterns and file filtering. Returns matching lines with file paths and line numbers.";
 
         public ToolDefinition GetDefinition()
         {
@@ -106,7 +107,7 @@ namespace AICA.Core.Tools
             if (call.Arguments.TryGetValue("case_sensitive", out var caseObj) && caseObj != null)
                 bool.TryParse(caseObj.ToString(), out caseSensitive);
 
-            int maxResults = 50;
+            int maxResults = 200;
             if (call.Arguments.TryGetValue("max_results", out var maxObj) && maxObj != null)
                 int.TryParse(maxObj.ToString(), out maxResults);
 
@@ -169,6 +170,9 @@ namespace AICA.Core.Tools
                 int filesSearched = 0;
                 int filesMatched = 0;
 
+                // Track per-file match counts for accurate statistics
+                var fileMatchCounts = new Dictionary<string, int>();
+
                 try
                 {
                     // Search in all paths (working directory + source roots)
@@ -194,7 +198,6 @@ namespace AICA.Core.Tools
                         foreach (var file in files)
                         {
                             if (ct.IsCancellationRequested) break;
-                            if (matchCount >= maxResults) break;
                             if (IsExcludedFile(file)) continue;
 
                             filesSearched++;
@@ -209,24 +212,35 @@ namespace AICA.Core.Tools
                                 }
 
                                 var lines = File.ReadAllLines(file);
-                                bool fileHasMatch = false;
+                                int fileMatchCount = 0;
+                                var relativePath = GetRelativePath(context.WorkingDirectory, file);
+                                bool fileHeaderWritten = false;
 
                                 for (int i = 0; i < lines.Length; i++)
                                 {
-                                    if (matchCount >= maxResults) break;
                                     if (regex.IsMatch(lines[i]))
                                     {
-                                        if (!fileHasMatch)
-                                        {
-                                            var relativePath = GetRelativePath(context.WorkingDirectory, file);
-                                            results.AppendLine($"\n{relativePath}:");
-                                            fileHasMatch = true;
-                                            filesMatched++;
-                                        }
+                                        fileMatchCount++;
 
-                                        results.AppendLine($"  {i + 1}: {lines[i].Trim()}");
-                                        matchCount++;
+                                        // Only write to results if we haven't hit the display limit
+                                        if (matchCount < maxResults)
+                                        {
+                                            if (!fileHeaderWritten)
+                                            {
+                                                results.AppendLine($"\n{relativePath}:");
+                                                fileHeaderWritten = true;
+                                            }
+                                            results.AppendLine($"  {i + 1}: {lines[i].Trim()}");
+                                            matchCount++;
+                                        }
                                     }
+                                }
+
+                                // Record file match count even if display was truncated
+                                if (fileMatchCount > 0)
+                                {
+                                    fileMatchCounts[relativePath] = fileMatchCount;
+                                    filesMatched++;
                                 }
                             }
                             catch
@@ -241,16 +255,32 @@ namespace AICA.Core.Tools
                     return ToolResult.Fail($"Search error: {ex.Message}");
                 }
 
-                if (matchCount == 0)
+                if (fileMatchCounts.Count == 0)
                 {
                     return ToolResult.Ok($"No matches found for '{query}' in {filesSearched} files.");
                 }
 
-                var summary = $"Found {matchCount} match(es) in {filesMatched} file(s) (searched {filesSearched} files)";
-                if (matchCount >= maxResults)
-                    summary += $" [truncated at {maxResults} results]";
+                // Calculate total matches (may be more than displayed)
+                int totalMatches = fileMatchCounts.Values.Sum();
 
-                return ToolResult.Ok(summary + "\n" + results.ToString());
+                var summary = new StringBuilder();
+                summary.AppendLine($"Found {totalMatches} match(es) in {filesMatched} file(s) (searched {filesSearched} files)");
+
+                // If results were truncated, provide per-file statistics
+                if (totalMatches > maxResults)
+                {
+                    summary.AppendLine($"[Display truncated at {maxResults} results, but all {totalMatches} matches were counted]");
+                    summary.AppendLine();
+                    summary.AppendLine("Per-file match counts:");
+                    foreach (var kvp in fileMatchCounts.OrderByDescending(x => x.Value))
+                    {
+                        summary.AppendLine($"  {kvp.Key}: {kvp.Value}");
+                    }
+                    summary.AppendLine();
+                    summary.AppendLine("Detailed matches (first " + maxResults + "):");
+                }
+
+                return ToolResult.Ok(summary.ToString() + results.ToString());
             }, ct).ConfigureAwait(false);
         }
 

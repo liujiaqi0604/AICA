@@ -36,6 +36,7 @@ namespace AICA.ToolWindows
         private VSUIContext _uiContext;
         private readonly ConversationStorage _conversationStorage = new ConversationStorage();
         private string _currentConversationId;
+        private int _globalToolCallCounter = 0; // Global counter for unique tool call IDs across all conversation turns
 
         public ChatToolWindowControl()
         {
@@ -323,6 +324,80 @@ namespace AICA.ToolWindows
                 customInstructions: options.CustomInstructions);
         }
 
+        private void RenderConversationStreaming(string toolLogsHtml, string streamingMarkdown)
+        {
+            var bodyBuilder = new StringBuilder();
+
+            for (int i = 0; i < _conversation.Count; i++)
+            {
+                var message = _conversation[i];
+                var roleClass = message.Role == "user" ? "user" : "assistant";
+                var roleName = message.Role == "user" ? "You" : "AI";
+
+                // Check if this is a completion message
+                if (message.Role == "assistant" && !string.IsNullOrEmpty(message.CompletionData))
+                {
+                    var completionResult = CompletionResult.Deserialize(message.CompletionData);
+                    if (completionResult != null)
+                    {
+                        // Render final layout in the desired order:
+                        // 1. tool logs 2. streamed body content 3. completion card
+                        bodyBuilder.AppendLine($"<div class=\"message {roleClass}\">");
+                        bodyBuilder.AppendLine($"<div class=\"role\">{roleName}</div>");
+
+                        if (!string.IsNullOrEmpty(message.ToolLogsHtml))
+                        {
+                            bodyBuilder.AppendLine($"<div class=\"content\">{message.ToolLogsHtml}</div>");
+                        }
+
+                        if (!string.IsNullOrEmpty(message.Content))
+                        {
+                            var contentHtml = Markdig.Markdown.ToHtml(message.Content, _markdownPipeline);
+                            bodyBuilder.AppendLine($"<div class=\"content\">{contentHtml}</div>");
+                        }
+
+                        bodyBuilder.AppendLine(BuildCompletionCardHtml(completionResult.Summary, completionResult.Command, i));
+                        bodyBuilder.AppendLine("</div>");
+                        continue;
+                    }
+                }
+
+                // Regular message rendering
+                // Check if content contains tool call HTML (starts with <div class="tool-call-container">)
+                if (message.Content != null && message.Content.Contains("<div class=\"tool-call-container\">"))
+                {
+                    // Content contains raw HTML, don't process through Markdown
+                    bodyBuilder.AppendLine($"<div class=\"message {roleClass}\"><div class=\"role\">{roleName}</div><div class=\"content\">{message.Content}</div></div>");
+                }
+                else
+                {
+                    // Regular markdown content
+                    var html = Markdig.Markdown.ToHtml(message.Content ?? string.Empty, _markdownPipeline);
+                    bodyBuilder.AppendLine($"<div class=\"message {roleClass}\"><div class=\"role\">{roleName}</div><div class=\"content\">{html}</div></div>");
+                }
+            }
+
+            if (!string.IsNullOrEmpty(toolLogsHtml) || !string.IsNullOrEmpty(streamingMarkdown))
+            {
+                bodyBuilder.AppendLine("<div class=\"message assistant streaming\"><div class=\"role\">AI</div><div class=\"content\">");
+
+                if (!string.IsNullOrEmpty(toolLogsHtml))
+                {
+                    bodyBuilder.AppendLine(toolLogsHtml);
+                }
+
+                if (!string.IsNullOrEmpty(streamingMarkdown))
+                {
+                    var streamingHtml = Markdig.Markdown.ToHtml(streamingMarkdown, _markdownPipeline);
+                    bodyBuilder.AppendLine(streamingHtml);
+                }
+
+                bodyBuilder.AppendLine("</div></div>");
+            }
+
+            UpdateBrowserContent(bodyBuilder.ToString());
+        }
+
         private void RenderConversation(string streamingContent = null)
         {
             var bodyBuilder = new StringBuilder();
@@ -339,18 +414,22 @@ namespace AICA.ToolWindows
                     var completionResult = CompletionResult.Deserialize(message.CompletionData);
                     if (completionResult != null)
                     {
-                        // Render message with tool logs AND completion card
+                        // Render final layout in the desired order:
+                        // 1. tool logs 2. streamed body content 3. completion card
                         bodyBuilder.AppendLine($"<div class=\"message {roleClass}\">");
                         bodyBuilder.AppendLine($"<div class=\"role\">{roleName}</div>");
 
-                        // First, render the tool logs and any text content
+                        if (!string.IsNullOrEmpty(message.ToolLogsHtml))
+                        {
+                            bodyBuilder.AppendLine($"<div class=\"content\">{message.ToolLogsHtml}</div>");
+                        }
+
                         if (!string.IsNullOrEmpty(message.Content))
                         {
                             var contentHtml = Markdig.Markdown.ToHtml(message.Content, _markdownPipeline);
                             bodyBuilder.AppendLine($"<div class=\"content\">{contentHtml}</div>");
                         }
 
-                        // Then, render the completion card
                         bodyBuilder.AppendLine(BuildCompletionCardHtml(completionResult.Summary, completionResult.Command, i));
                         bodyBuilder.AppendLine("</div>");
                         continue;
@@ -493,7 +572,6 @@ namespace AICA.ToolWindows
             var responseBuilder = new StringBuilder();
             var toolOutputBuilder = new StringBuilder();
             var hasToolCalls = false;
-            var toolCallCounter = 0;
             var pendingToolCalls = new Dictionary<string, (ToolCall call, int id)>();
 
             // Add user message to history BEFORE executing agent
@@ -535,8 +613,9 @@ namespace AICA.ToolWindows
                                 // when the first ToolStart arrives (see below).
                                 // For non-tool responses (knowledge questions, explanations),
                                 // the streaming text IS the actual answer.
-                                // Tool output should always be at the top, followed by response text
-                                RenderConversation(toolOutputBuilder.ToString() + responseBuilder.ToString());
+                                // Tool output and streaming markdown must be rendered separately
+                                // to avoid mixing raw HTML with markdown text.
+                                RenderConversationStreaming(toolOutputBuilder.ToString(), responseBuilder.ToString());
                                 break;
 
                             case AgentStepType.ToolStart:
@@ -553,7 +632,7 @@ namespace AICA.ToolWindows
                                 // Don't show attempt_completion in tool logs (its text becomes the main response)
                                 if (step.ToolCall.Name != "attempt_completion")
                                 {
-                                    var toolId = toolCallCounter++;
+                                    var toolId = _globalToolCallCounter++;
                                     pendingToolCalls[step.ToolCall.Id] = (step.ToolCall, toolId);
 
                                     // Generate enhanced tool call HTML (without result yet)
@@ -567,7 +646,7 @@ namespace AICA.ToolWindows
                                     toolOutputBuilder.AppendLine(toolHtml);
                                 }
                                 // Tool output should always be at the top, followed by response text
-                                RenderConversation(toolOutputBuilder.ToString() + responseBuilder.ToString());
+                                RenderConversationStreaming(toolOutputBuilder.ToString(), responseBuilder.ToString());
                                 break;
 
                             case AgentStepType.ToolResult:
@@ -606,7 +685,7 @@ namespace AICA.ToolWindows
                                 }
 
                                 // Tool output should always be at the top, followed by response text
-                                RenderConversation(toolOutputBuilder.ToString() + responseBuilder.ToString());
+                                RenderConversationStreaming(toolOutputBuilder.ToString(), responseBuilder.ToString());
                                 break;
 
                             case AgentStepType.Complete:
@@ -617,41 +696,15 @@ namespace AICA.ToolWindows
                                     completionResult = CompletionResult.Deserialize(step.Text);
                                 }
 
-                                // Build final content: for tool-assisted responses, include
-                                // the detailed text the LLM generated after seeing tool results.
-                                string finalContent;
-                                if (hasToolCalls)
+                                // For completion responses, always trust the structured completion summary
+                                // as the final user-facing answer. Streaming text before attempt_completion
+                                // often contains internal tool-decision language and should not be persisted.
+                                string finalContent = responseBuilder.ToString().Trim();
+                                string finalToolLogs = hasToolCalls ? toolOutputBuilder.ToString() : null;
+
+                                if (!hasToolCalls && string.IsNullOrWhiteSpace(finalContent) && completionResult != null)
                                 {
-                                    // Include tool output logs BEFORE the completion summary
-                                    var toolLogs = toolOutputBuilder.ToString();
-
-                                    // Get the completion summary
-                                    var mainText = responseBuilder.ToString().Trim();
-                                    var completionText = completionResult?.Summary?.Trim() ?? step.Text?.Trim() ?? "";
-
-                                    string textContent;
-                                    if (!string.IsNullOrEmpty(mainText))
-                                    {
-                                        // Use the detailed streaming text the user saw during generation
-                                        textContent = mainText;
-                                    }
-                                    else if (!string.IsNullOrEmpty(completionText))
-                                    {
-                                        // Fallback to attempt_completion summary
-                                        textContent = completionText;
-                                    }
-                                    else
-                                    {
-                                        textContent = "";
-                                    }
-
-                                    // Build final content: tool logs + text content
-                                    // This ensures users can see what tools were called
-                                    finalContent = toolLogs + (!string.IsNullOrEmpty(textContent) ? "\n" + textContent : "");
-                                }
-                                else
-                                {
-                                    finalContent = responseBuilder.ToString() + toolOutputBuilder.ToString();
+                                    finalContent = completionResult.Summary;
                                 }
 
                                 // Diagnostic hint: only if no tools AND response has action-like language
@@ -665,17 +718,18 @@ namespace AICA.ToolWindows
                                         "3. 在选项中检查 'Enable Tool Calling' 是否已启用";
                                 }
 
-                                if (!string.IsNullOrWhiteSpace(finalContent))
+                                if (!string.IsNullOrWhiteSpace(finalContent) || completionResult != null || !string.IsNullOrWhiteSpace(finalToolLogs))
                                 {
                                     var message = new ConversationMessage
                                     {
                                         Role = "assistant",
                                         Content = finalContent,
+                                        ToolLogsHtml = finalToolLogs,
                                         CompletionData = completionResult != null ? step.Text : null
                                     };
                                     _conversation.Add(message);
                                     // Also add to LLM history for next turn's context
-                                    _llmHistory.Add(ChatMessage.Assistant(finalContent));
+                                    _llmHistory.Add(ChatMessage.Assistant(completionResult?.Summary ?? finalContent));
                                 }
                                 RenderConversation();
                                 break;
@@ -1171,6 +1225,7 @@ namespace AICA.ToolWindows
         {
             public string Role { get; set; }
             public string Content { get; set; }
+            public string ToolLogsHtml { get; set; }
             public string CompletionData { get; set; } // Stores serialized CompletionResult
         }
 

@@ -16,9 +16,9 @@ namespace AICA.Core.LLM
         public string ApiKey { get; set; }
 
         /// <summary>
-        /// Model identifier
+        /// Model identifier (e.g., "MiniMax-M2.5", "qwen3-coder", "deepseek-coder")
         /// </summary>
-        public string Model { get; set; } = "qwen3-coder";
+        public string Model { get; set; } = "MiniMax-M2.5-Test";
 
         /// <summary>
         /// Maximum tokens for response

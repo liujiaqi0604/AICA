@@ -13,7 +13,7 @@ namespace AICA.Core.Tools
     public class ListProjectsTool : IAgentTool
     {
         public string Name => "list_projects";
-        public string Description => "List all projects in the Visual Studio solution (.sln file). This tool parses .vcxproj/.csproj files to show project metadata, types, file counts, filters, and dependencies. Use this when the user asks about 'projects', 'solution structure', '项目', '解决方案' or wants to understand what projects exist in the solution. DO NOT use list_dir for this purpose.";
+        public string Description => "List all projects in the Visual Studio solution. Shows project types, file counts, filters, and dependencies. Use this to understand solution structure. Can show details for a specific project with project_name parameter.";
 
         public ToolDefinition GetDefinition()
         {
