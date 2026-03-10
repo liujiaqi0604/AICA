@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -25,8 +26,9 @@ namespace AICA.Core.Storage
 
         public ConversationStorage(string storageDir = null)
         {
+            // 修改存储路径到 C:\Users\{用户名}\.AICA\conversations
             _storageDir = storageDir ??
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AICA", "conversations");
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".AICA", "conversations");
 
             if (!Directory.Exists(_storageDir))
                 Directory.CreateDirectory(_storageDir);
@@ -38,8 +40,12 @@ namespace AICA.Core.Storage
         public async Task SaveConversationAsync(ConversationRecord record)
         {
             if (record == null) throw new ArgumentNullException(nameof(record));
+
+            // Generate unique ID based on project path + creation time
             if (string.IsNullOrEmpty(record.Id))
-                record.Id = Guid.NewGuid().ToString("N");
+            {
+                record.Id = GenerateConversationId(record.ProjectPath, record.CreatedAt);
+            }
 
             record.UpdatedAt = DateTimeOffset.UtcNow;
 
@@ -47,6 +53,26 @@ namespace AICA.Core.Storage
             var json = JsonSerializer.Serialize(record, _jsonOptions);
             File.WriteAllText(filePath, json);
             await Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Generate a unique conversation ID based on project path and creation time.
+        /// This ensures the same conversation is identified consistently across sessions.
+        /// </summary>
+        private string GenerateConversationId(string projectPath, DateTimeOffset createdAt)
+        {
+            // Normalize project path (handle null/empty)
+            var normalizedPath = string.IsNullOrEmpty(projectPath) ? "no-project" : projectPath.ToLowerInvariant();
+
+            // Create unique string: projectPath + createdAt (ticks for precision)
+            var uniqueString = $"{normalizedPath}|{createdAt.UtcTicks}";
+
+            // Generate SHA256 hash
+            using (var sha256 = SHA256.Create())
+            {
+                var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(uniqueString));
+                return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant().Substring(0, 32);
+            }
         }
 
         /// <summary>
@@ -71,12 +97,23 @@ namespace AICA.Core.Storage
         {
             var summaries = new List<ConversationSummary>();
 
-            if (!Directory.Exists(_storageDir))
-                return Task.FromResult(summaries);
+            System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsAsync: _storageDir={_storageDir}");
+            System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsAsync: Directory.Exists={Directory.Exists(_storageDir)}");
 
-            foreach (var file in Directory.GetFiles(_storageDir, "*.json")
+            if (!Directory.Exists(_storageDir))
+            {
+                System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsAsync: Storage directory does not exist, returning empty list");
+                return Task.FromResult(summaries);
+            }
+
+            var files = Directory.GetFiles(_storageDir, "*.json")
                 .OrderByDescending(f => File.GetLastWriteTimeUtc(f))
-                .Take(limit))
+                .Take(limit)
+                .ToList();
+
+            System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsAsync: Found {files.Count} JSON files");
+
+            foreach (var file in files)
             {
                 try
                 {
@@ -91,17 +128,77 @@ namespace AICA.Core.Storage
                             CreatedAt = record.CreatedAt,
                             UpdatedAt = record.UpdatedAt,
                             MessageCount = record.Messages?.Count ?? 0,
-                            WorkingDirectory = record.WorkingDirectory
+                            WorkingDirectory = record.WorkingDirectory,
+                            ProjectPath = record.ProjectPath,
+                            ProjectName = record.ProjectName,
+                            SolutionPath = record.SolutionPath
                         });
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Skip corrupted files
+                    System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsAsync: Failed to load {file}: {ex.Message}");
                 }
             }
 
+            System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsAsync: Loaded {summaries.Count} summaries");
             return Task.FromResult(summaries);
+        }
+
+        /// <summary>
+        /// List conversations filtered by project path.
+        /// </summary>
+        public async Task<List<ConversationSummary>> ListConversationsForProjectAsync(
+            string projectPath,
+            int limit = 50)
+        {
+            var allConversations = await ListConversationsAsync(limit * 2);
+            System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsForProjectAsync: Total conversations loaded: {allConversations.Count}");
+
+            if (string.IsNullOrEmpty(projectPath))
+            {
+                // 无项目时，返回所有无项目关联的会话
+                return allConversations
+                    .Where(c => string.IsNullOrEmpty(c.ProjectPath))
+                    .Take(limit)
+                    .ToList();
+            }
+
+            // 标准化路径（统一大小写和斜杠）
+            var normalizedPath = NormalizePath(projectPath);
+            System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsForProjectAsync: Looking for projectPath={projectPath}");
+            System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsForProjectAsync: Normalized path={normalizedPath}");
+
+            var matchedConversations = allConversations
+                .Where(c =>
+                {
+                    var matches = !string.IsNullOrEmpty(c.ProjectPath) &&
+                                  NormalizePath(c.ProjectPath) == normalizedPath;
+                    System.Diagnostics.Debug.WriteLine($"[AICA]   Conversation {c.Id}: ProjectPath={c.ProjectPath}, Normalized={NormalizePath(c.ProjectPath ?? "")}, Matches={matches}");
+                    return matches;
+                })
+                .Take(limit)
+                .ToList();
+
+            System.Diagnostics.Debug.WriteLine($"[AICA] ListConversationsForProjectAsync: Matched {matchedConversations.Count} conversations");
+            return matchedConversations;
+        }
+
+        /// <summary>
+        /// List all conversations across all projects (for /allresume feature).
+        /// </summary>
+        public async Task<List<ConversationSummary>> ListAllConversationsAsync(int limit = 100)
+        {
+            return await ListConversationsAsync(limit);
+        }
+
+        /// <summary>
+        /// Normalize path for comparison (case-insensitive, unified slashes).
+        /// </summary>
+        private string NormalizePath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return string.Empty;
+            return Path.GetFullPath(path).ToLowerInvariant().Replace('/', '\\');
         }
 
         /// <summary>
@@ -216,6 +313,12 @@ namespace AICA.Core.Storage
         public string Id { get; set; }
         public string Title { get; set; }
         public string WorkingDirectory { get; set; }
+
+        // 新增：项目信息字段
+        public string ProjectPath { get; set; }
+        public string ProjectName { get; set; }
+        public string SolutionPath { get; set; }
+
         public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
         public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
         public List<ConversationMessageRecord> Messages { get; set; } = new List<ConversationMessageRecord>();
@@ -229,6 +332,11 @@ namespace AICA.Core.Storage
         public string Role { get; set; }
         public string Content { get; set; }
         public string ToolName { get; set; }
+
+        // 新增：支持保存工具调用日志和完成数据
+        public string ToolLogsHtml { get; set; }
+        public string CompletionData { get; set; }
+
         public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
     }
 
@@ -243,5 +351,10 @@ namespace AICA.Core.Storage
         public DateTimeOffset UpdatedAt { get; set; }
         public int MessageCount { get; set; }
         public string WorkingDirectory { get; set; }
+
+        // 新增：项目信息字段
+        public string ProjectPath { get; set; }
+        public string ProjectName { get; set; }
+        public string SolutionPath { get; set; }
     }
 }

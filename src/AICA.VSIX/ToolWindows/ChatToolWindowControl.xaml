@@ -10,74 +10,170 @@
              Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}">
     
     <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
 
-        <!-- Header -->
-        <Border Grid.Row="0" BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}" 
-                BorderThickness="0,0,0,1" Padding="10,8">
+        <!-- Main Content Area -->
+        <Grid Grid.Column="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Header -->
+            <Border Grid.Row="0" BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
+                    BorderThickness="0,0,0,1" Padding="10,8">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="AICA - AI Coding Assistant"
+                               FontWeight="SemiBold" FontSize="14"
+                               VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button x:Name="ClearButton" Content="Clear" Padding="8,4" Margin="4,0"
+                                Click="ClearButton_Click" />
+                        <Button x:Name="HistoryButton" Content="📋" Padding="8,4" Margin="4,0"
+                                Click="HistoryButton_Click" ToolTip="会话历史" />
+                        <Button x:Name="SettingsButton" Content="⚙" Padding="8,4"
+                                Click="SettingsButton_Click" ToolTip="Settings" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Warning Banner -->
+            <Border x:Name="WarningBanner" Grid.Row="1" Visibility="Collapsed"
+                    Background="#332200" BorderBrush="#AA7700" BorderThickness="0,0,0,1" Padding="10,6">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="⚠" FontSize="14" Margin="0,0,6,0"
+                               Foreground="#FFAA00" VerticalAlignment="Top" />
+                    <TextBlock x:Name="WarningText" Grid.Column="1" TextWrapping="Wrap"
+                               Foreground="#FFCC44" FontSize="12" />
+                </Grid>
+            </Border>
+
+            <!-- Chat Content -->
+            <WebBrowser x:Name="ChatBrowser" Grid.Row="2" />
+
+            <!-- Input Area -->
+            <Border Grid.Row="3" BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
+                    BorderThickness="0,1,0,0" Padding="8">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBox x:Name="InputTextBox" Grid.Column="0"
+                             AcceptsReturn="True" TextWrapping="Wrap"
+                             MaxHeight="120" MinHeight="60"
+                             VerticalScrollBarVisibility="Auto"
+                             KeyDown="InputTextBox_KeyDown"
+                             Padding="8"
+                             Background="{DynamicResource {x:Static vsshell:VsBrushes.ComboBoxBackgroundKey}}"
+                             Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
+                             BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ComboBoxBorderKey}}" />
+
+                    <Button x:Name="SendButton" Grid.Column="1"
+                            Content="Send" Padding="16,8" Margin="8,0,0,0"
+                            VerticalAlignment="Bottom"
+                            Click="SendButton_Click" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- History Sidebar -->
+        <Border x:Name="HistorySidebar" Grid.Column="1" Width="0"
+                BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
+                BorderThickness="1,0,0,0"
+                Background="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBackgroundKey}}">
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="AICA - AI Coding Assistant" 
-                           FontWeight="SemiBold" FontSize="14"
-                           VerticalAlignment="Center" />
-                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <Button x:Name="ClearButton" Content="Clear" Padding="8,4" Margin="4,0"
-                            Click="ClearButton_Click" />
-                    <Button x:Name="SettingsButton" Content="⚙" Padding="8,4"
-                            Click="SettingsButton_Click" ToolTip="Settings" />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- Sidebar Header -->
+                <Border Grid.Row="0" BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
+                        BorderThickness="0,0,0,1" Padding="10,8">
+                    <TextBlock Text="会话历史" FontWeight="SemiBold" FontSize="13" />
+                </Border>
+
+                <!-- Search and New Conversation -->
+                <StackPanel Grid.Row="1" Margin="8">
+                    <TextBox x:Name="SearchTextBox" Padding="6"
+                             Background="{DynamicResource {x:Static vsshell:VsBrushes.ComboBoxBackgroundKey}}"
+                             Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
+                             BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ComboBoxBorderKey}}"
+                             TextChanged="SearchTextBox_TextChanged">
+                        <TextBox.Style>
+                            <Style TargetType="TextBox">
+                                <Style.Triggers>
+                                    <Trigger Property="Text" Value="">
+                                        <Setter Property="Background" Value="Transparent"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBox.Style>
+                    </TextBox>
+                    <TextBlock Text="🔍 搜索..." IsHitTestVisible="False" Padding="8,6"
+                               Foreground="{DynamicResource {x:Static vsshell:VsBrushes.GrayTextKey}}"
+                               Visibility="{Binding ElementName=SearchTextBox, Path=Text.IsEmpty}" />
+
+                    <Button x:Name="NewConversationButton" Content="✨ 新建会话" Margin="0,8,0,0"
+                            Padding="8,6" Click="NewConversationButton_Click"
+                            HorizontalAlignment="Stretch" />
                 </StackPanel>
-            </Grid>
-        </Border>
 
-        <!-- Warning Banner -->
-        <Border x:Name="WarningBanner" Grid.Row="1" Visibility="Collapsed"
-                Background="#332200" BorderBrush="#AA7700" BorderThickness="0,0,0,1" Padding="10,6">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="⚠" FontSize="14" Margin="0,0,6,0" 
-                           Foreground="#FFAA00" VerticalAlignment="Top" />
-                <TextBlock x:Name="WarningText" Grid.Column="1" TextWrapping="Wrap" 
-                           Foreground="#FFCC44" FontSize="12" />
-            </Grid>
-        </Border>
+                <!-- Conversation List -->
+                <ListBox x:Name="ConversationListBox" Grid.Row="2"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         SelectionChanged="ConversationListBox_SelectionChanged">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
+                                    BorderThickness="0,0,0,1" Padding="0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
 
-        <!-- Chat Content -->
-        <WebBrowser x:Name="ChatBrowser" Grid.Row="2" />
+                                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="10,8,8,8">
+                                        <TextBlock Text="{Binding Title}" FontWeight="Medium" FontSize="12"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
+                                                   ToolTip="{Binding Title}" />
+                                        <TextBlock Text="{Binding DisplayInfo}" FontSize="10" Margin="0,2,0,0"
+                                                   Foreground="{DynamicResource {x:Static vsshell:VsBrushes.GrayTextKey}}" />
+                                    </StackPanel>
 
-        <!-- Input Area -->
-        <Border Grid.Row="3" BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}" 
-                BorderThickness="0,1,0,0" Padding="8">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                
-                <TextBox x:Name="InputTextBox" Grid.Column="0" 
-                         AcceptsReturn="True" TextWrapping="Wrap"
-                         MaxHeight="120" MinHeight="60"
-                         VerticalScrollBarVisibility="Auto"
-                         KeyDown="InputTextBox_KeyDown"
-                         Padding="8"
-                         Background="{DynamicResource {x:Static vsshell:VsBrushes.ComboBoxBackgroundKey}}"
-                         Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
-                         BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ComboBoxBorderKey}}" />
-                
-                <Button x:Name="SendButton" Grid.Column="1" 
-                        Content="Send" Padding="16,8" Margin="8,0,0,0"
-                        VerticalAlignment="Bottom"
-                        Click="SendButton_Click" />
+                                    <Button Grid.Column="1" Content="🗑" Padding="8,4"
+                                            Click="DeleteConversationButton_Click"
+                                            Tag="{Binding Id}"
+                                            ToolTip="删除会话"
+                                            VerticalAlignment="Center"
+                                            HorizontalAlignment="Right"
+                                            Background="Transparent"
+                                            BorderThickness="0"
+                                            Margin="0,0,0,0" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
             </Grid>
         </Border>
     </Grid>

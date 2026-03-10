@@ -37,6 +37,11 @@ namespace AICA.ToolWindows
         private readonly ConversationStorage _conversationStorage = new ConversationStorage();
         private string _currentConversationId;
         private int _globalToolCallCounter = 0; // Global counter for unique tool call IDs across all conversation turns
+        private DTE2 _dte; // Visual Studio DTE for project information
+        private EnvDTE.SolutionEvents _solutionEvents; // Solution events for project switching detection
+        private bool _isSidebarOpen = false; // Track sidebar state
+        private List<ConversationViewModel> _allConversations = new List<ConversationViewModel>(); // Cache all conversations
+        private string _lastProjectPath = null; // Track last project path to detect project switching
 
         public ChatToolWindowControl()
         {
@@ -52,6 +57,85 @@ namespace AICA.ToolWindows
             ChatBrowser.NavigateToString(BuildPageHtml(string.Empty));
 
             Loaded += ChatToolWindowControl_Loaded;
+            Unloaded += ChatToolWindowControl_Unloaded;
+
+            // Get DTE2 instance
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as DTE2;
+
+            // Subscribe to solution events for automatic project switching
+            if (_dte != null)
+            {
+                _solutionEvents = _dte.Events.SolutionEvents;
+                _solutionEvents.Opened += OnSolutionOpened;
+                _solutionEvents.AfterClosing += OnSolutionClosed;
+            }
+        }
+
+        private async void ChatToolWindowControl_Unloaded(object sender, RoutedEventArgs e)
+        {
+            // Auto-save conversation when window is unloaded
+            await SaveConversationAsync();
+
+            // Unsubscribe from solution events
+            if (_solutionEvents != null)
+            {
+                _solutionEvents.Opened -= OnSolutionOpened;
+                _solutionEvents.AfterClosing -= OnSolutionClosed;
+            }
+        }
+
+        private void OnSolutionOpened()
+        {
+            // Handle solution opened event - switch to new project's conversation list
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                // Save current conversation before switching
+                await SaveConversationAsync();
+
+                // Clear current conversation and start fresh
+                ClearConversation();
+
+                // Update last project path
+                _lastProjectPath = GetCurrentProjectPath();
+
+                // If sidebar is open, refresh the conversation list
+                if (_isSidebarOpen)
+                {
+                    await LoadConversationListAsync();
+                }
+
+                System.Diagnostics.Debug.WriteLine("[AICA] Solution opened - conversation list refreshed");
+            }).FireAndForget();
+        }
+
+        private void OnSolutionClosed()
+        {
+            // Handle solution closed event
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                // Save current conversation before closing
+                await SaveConversationAsync();
+
+                // Clear current conversation
+                ClearConversation();
+
+                // Clear last project path
+                _lastProjectPath = null;
+
+                // Clear conversation list if sidebar is open
+                if (_isSidebarOpen)
+                {
+                    _allConversations.Clear();
+                    ConversationListBox.ItemsSource = null;
+                }
+
+                System.Diagnostics.Debug.WriteLine("[AICA] Solution closed - conversation saved");
+            }).FireAndForget();
         }
 
         private void ChatToolWindowControl_Loaded(object sender, RoutedEventArgs e)
@@ -192,6 +276,14 @@ namespace AICA.ToolWindows
             UpdateBrowserContent(string.Empty);
         }
 
+        /// <summary>
+        /// Public method to save current conversation (called from ChatToolWindow)
+        /// </summary>
+        public async System.Threading.Tasks.Task SaveCurrentConversationAsync()
+        {
+            await SaveConversationAsync();
+        }
+
         private void InitializeAgentComponents(GeneralOptions options)
         {
             // Initialize tool dispatcher with available tools
@@ -322,6 +414,114 @@ namespace AICA.ToolWindows
                 maxIterations: options.MaxAgentIterations,
                 maxTokenBudget: tokenBudget,
                 customInstructions: options.CustomInstructions);
+        }
+
+        /// <summary>
+        /// Render conversation with interleaved tool calls and text
+        /// </summary>
+        private void RenderConversationStreamingInterleaved(List<ToolCallBlock> toolCallBlocks, ToolCallBlock currentBlock, string remainingText)
+        {
+            var bodyBuilder = new StringBuilder();
+
+            // Render all previous conversation messages
+            for (int i = 0; i < _conversation.Count; i++)
+            {
+                var message = _conversation[i];
+                var roleClass = message.Role == "user" ? "user" : "assistant";
+                var roleName = message.Role == "user" ? "You" : "AI";
+
+                // Check if this is a completion message
+                if (message.Role == "assistant" && !string.IsNullOrEmpty(message.CompletionData))
+                {
+                    var completionResult = CompletionResult.Deserialize(message.CompletionData);
+                    if (completionResult != null)
+                    {
+                        bodyBuilder.AppendLine($"<div class=\"message {roleClass}\">");
+                        bodyBuilder.AppendLine($"<div class=\"role\">{roleName}</div>");
+
+                        if (!string.IsNullOrEmpty(message.ToolLogsHtml))
+                        {
+                            bodyBuilder.AppendLine($"<div class=\"content\">{message.ToolLogsHtml}</div>");
+                        }
+
+                        if (!string.IsNullOrEmpty(message.Content))
+                        {
+                            var contentHtml = Markdig.Markdown.ToHtml(message.Content, _markdownPipeline);
+                            bodyBuilder.AppendLine($"<div class=\"content\">{contentHtml}</div>");
+                        }
+
+                        bodyBuilder.AppendLine(BuildCompletionCardHtml(completionResult.Summary, completionResult.Command, i));
+                        bodyBuilder.AppendLine("</div>");
+                        continue;
+                    }
+                }
+
+                // Regular message rendering
+                if (message.Content != null && message.Content.Contains("<div class=\"tool-call-container\">"))
+                {
+                    bodyBuilder.AppendLine($"<div class=\"message {roleClass}\"><div class=\"role\">{roleName}</div><div class=\"content\">{message.Content}</div></div>");
+                }
+                else
+                {
+                    var html = Markdig.Markdown.ToHtml(message.Content ?? string.Empty, _markdownPipeline);
+                    bodyBuilder.AppendLine($"<div class=\"message {roleClass}\"><div class=\"role\">{roleName}</div><div class=\"content\">{html}</div></div>");
+                }
+            }
+
+            // Render streaming message with interleaved tool blocks
+            if (toolCallBlocks.Count > 0 || !string.IsNullOrEmpty(remainingText))
+            {
+                bodyBuilder.AppendLine("<div class=\"message assistant streaming\"><div class=\"role\">AI</div><div class=\"content\">");
+
+                // Render each tool call block with its associated text
+                foreach (var block in toolCallBlocks)
+                {
+                    // Render tool call HTML
+                    bodyBuilder.AppendLine(block.ToolHtml);
+
+                    // Render text that came after this tool call
+                    if (block.TextAfter.Length > 0)
+                    {
+                        var textHtml = Markdig.Markdown.ToHtml(block.TextAfter.ToString(), _markdownPipeline);
+                        bodyBuilder.AppendLine(textHtml);
+                    }
+                }
+
+                // Render any remaining text that hasn't been associated with a tool block yet
+                // (this happens for non-tool responses or text before the first tool call)
+                if (!string.IsNullOrEmpty(remainingText) && currentBlock == null)
+                {
+                    var streamingHtml = Markdig.Markdown.ToHtml(remainingText, _markdownPipeline);
+                    bodyBuilder.AppendLine(streamingHtml);
+                }
+
+                bodyBuilder.AppendLine("</div></div>");
+            }
+
+            UpdateBrowserContent(bodyBuilder.ToString());
+        }
+
+        /// <summary>
+        /// Build final HTML from interleaved tool call blocks (for persisting to conversation)
+        /// </summary>
+        private string BuildInterleavedToolLogsHtml(List<ToolCallBlock> toolCallBlocks)
+        {
+            var html = new StringBuilder();
+
+            foreach (var block in toolCallBlocks)
+            {
+                // Add tool call HTML
+                html.AppendLine(block.ToolHtml);
+
+                // Add text that came after this tool call
+                if (block.TextAfter.Length > 0)
+                {
+                    var textHtml = Markdig.Markdown.ToHtml(block.TextAfter.ToString(), _markdownPipeline);
+                    html.AppendLine(textHtml);
+                }
+            }
+
+            return html.ToString();
         }
 
         private void RenderConversationStreaming(string toolLogsHtml, string streamingMarkdown)
@@ -511,13 +711,16 @@ namespace AICA.ToolWindows
             SendButton.IsEnabled = false;
             _currentCts = new CancellationTokenSource();
 
+            // Check if this is the first message (for title update)
+            bool isFirstMessage = _conversation.Count == 0;
+
             try
             {
                 InputTextBox.Text = string.Empty;
                 AppendMessage("user", userMessage);
 
                 var options = await GeneralOptions.GetLiveInstanceAsync();
-                
+
                 if (string.IsNullOrEmpty(options.ApiEndpoint))
                 {
                     AppendMessage("assistant", "⚠️ Please configure the LLM API endpoint in Tools > Options > AICA > General");
@@ -542,6 +745,12 @@ namespace AICA.ToolWindows
 
                 // Auto-save conversation after each exchange
                 await SaveConversationAsync();
+
+                // Update conversation title if this is the first message
+                if (isFirstMessage)
+                {
+                    await UpdateConversationTitleAsync(userMessage);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -567,12 +776,104 @@ namespace AICA.ToolWindows
             }
         }
 
+        /// <summary>
+        /// Represents a tool call block with its associated text response
+        /// </summary>
+        private class ToolCallBlock
+        {
+            public string ToolHtml { get; set; }
+            public StringBuilder TextAfter { get; set; } = new StringBuilder();
+            public int ToolId { get; set; }
+            public string ToolCallId { get; set; }
+        }
+
+        /// <summary>
+        /// Update conversation title based on first user message
+        /// </summary>
+        private async System.Threading.Tasks.Task UpdateConversationTitleAsync(string firstMessage)
+        {
+            if (string.IsNullOrEmpty(_currentConversationId))
+                return;
+
+            try
+            {
+                // Truncate message to max 50 characters for title
+                var title = firstMessage.Length > 50 ? firstMessage.Substring(0, 50) + "..." : firstMessage;
+
+                // Load conversation record
+                var record = await _conversationStorage.LoadConversationAsync(_currentConversationId);
+                if (record != null)
+                {
+                    record.Title = title;
+                    await _conversationStorage.SaveConversationAsync(record);
+
+                    // Update in UI list (INotifyPropertyChanged will handle UI update)
+                    var viewModel = _allConversations.FirstOrDefault(c => c.Id == _currentConversationId);
+                    if (viewModel != null)
+                    {
+                        viewModel.Title = title;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[AICA] Updated conversation title: {title}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AICA] Failed to update conversation title: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// View model for conversation list item
+        /// </summary>
+        private class ConversationViewModel : System.ComponentModel.INotifyPropertyChanged
+        {
+            private string _title;
+
+            public string Id { get; set; }
+
+            public string Title
+            {
+                get => _title;
+                set
+                {
+                    if (_title != value)
+                    {
+                        _title = value;
+                        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(Title)));
+                        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(DisplayInfo)));
+                    }
+                }
+            }
+
+            public string TimeAgo { get; set; }
+            public DateTimeOffset UpdatedAt { get; set; }
+            public string ProjectName { get; set; } // For /allresume mode
+
+            public string DisplayInfo
+            {
+                get
+                {
+                    if (!string.IsNullOrEmpty(ProjectName))
+                    {
+                        return $"{ProjectName} | {TimeAgo}";
+                    }
+                    return TimeAgo;
+                }
+            }
+
+            public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
+        }
+
         private async System.Threading.Tasks.Task ExecuteAgentModeAsync(string userMessage)
         {
             var responseBuilder = new StringBuilder();
-            var toolOutputBuilder = new StringBuilder();
             var hasToolCalls = false;
             var pendingToolCalls = new Dictionary<string, (ToolCall call, int id)>();
+
+            // NEW: Track tool call blocks in order, each with its associated text
+            var toolCallBlocks = new List<ToolCallBlock>();
+            ToolCallBlock currentBlock = null; // Current block being built
 
             // Add user message to history BEFORE executing agent
             // This ensures the next turn can see this message in previousMessages
@@ -608,14 +909,16 @@ namespace AICA.ToolWindows
                         {
                             case AgentStepType.TextChunk:
                                 responseBuilder.Append(step.Text);
-                                // Always show streaming text in real-time.
-                                // For tool-using responses, pre-tool text is discarded
-                                // when the first ToolStart arrives (see below).
-                                // For non-tool responses (knowledge questions, explanations),
-                                // the streaming text IS the actual answer.
-                                // Tool output and streaming markdown must be rendered separately
-                                // to avoid mixing raw HTML with markdown text.
-                                RenderConversationStreaming(toolOutputBuilder.ToString(), responseBuilder.ToString());
+
+                                // NEW: If we have a current tool block, append text to it
+                                // Otherwise, append to the global response builder (for non-tool responses)
+                                if (currentBlock != null)
+                                {
+                                    currentBlock.TextAfter.Append(step.Text);
+                                }
+
+                                // Render with interleaved tool blocks and text
+                                RenderConversationStreamingInterleaved(toolCallBlocks, currentBlock, responseBuilder.ToString());
                                 break;
 
                             case AgentStepType.ToolStart:
@@ -629,6 +932,7 @@ namespace AICA.ToolWindows
                                     responseBuilder.Clear();
                                 }
                                 hasToolCalls = true;
+
                                 // Don't show attempt_completion in tool logs (its text becomes the main response)
                                 if (step.ToolCall.Name != "attempt_completion")
                                 {
@@ -643,10 +947,18 @@ namespace AICA.ToolWindows
                                         true,
                                         toolId
                                     );
-                                    toolOutputBuilder.AppendLine(toolHtml);
+
+                                    // NEW: Create a new tool call block
+                                    currentBlock = new ToolCallBlock
+                                    {
+                                        ToolHtml = toolHtml,
+                                        ToolId = toolId,
+                                        ToolCallId = step.ToolCall.Id
+                                    };
+                                    toolCallBlocks.Add(currentBlock);
                                 }
-                                // Tool output should always be at the top, followed by response text
-                                RenderConversationStreaming(toolOutputBuilder.ToString(), responseBuilder.ToString());
+
+                                RenderConversationStreamingInterleaved(toolCallBlocks, currentBlock, responseBuilder.ToString());
                                 break;
 
                             case AgentStepType.ToolResult:
@@ -670,22 +982,15 @@ namespace AICA.ToolWindows
                                         toolInfo.id
                                     );
 
-                                    // Replace the old tool call HTML with the updated one
-                                    var oldToolHtml = BuildToolCallHtml(
-                                        toolInfo.call.Name,
-                                        toolInfo.call.Arguments,
-                                        null,
-                                        true,
-                                        toolInfo.id
-                                    );
-
-                                    var currentOutput = toolOutputBuilder.ToString();
-                                    toolOutputBuilder.Clear();
-                                    toolOutputBuilder.Append(currentOutput.Replace(oldToolHtml, toolHtml));
+                                    // NEW: Find and update the corresponding block
+                                    var block = toolCallBlocks.FirstOrDefault(b => b.ToolCallId == step.ToolCall.Id);
+                                    if (block != null)
+                                    {
+                                        block.ToolHtml = toolHtml;
+                                    }
                                 }
 
-                                // Tool output should always be at the top, followed by response text
-                                RenderConversationStreaming(toolOutputBuilder.ToString(), responseBuilder.ToString());
+                                RenderConversationStreamingInterleaved(toolCallBlocks, currentBlock, responseBuilder.ToString());
                                 break;
 
                             case AgentStepType.Complete:
@@ -700,7 +1005,13 @@ namespace AICA.ToolWindows
                                 // as the final user-facing answer. Streaming text before attempt_completion
                                 // often contains internal tool-decision language and should not be persisted.
                                 string finalContent = responseBuilder.ToString().Trim();
-                                string finalToolLogs = hasToolCalls ? toolOutputBuilder.ToString() : null;
+
+                                // NEW: Build final tool logs HTML from interleaved blocks
+                                string finalToolLogs = null;
+                                if (hasToolCalls && toolCallBlocks.Count > 0)
+                                {
+                                    finalToolLogs = BuildInterleavedToolLogsHtml(toolCallBlocks);
+                                }
 
                                 if (!hasToolCalls && string.IsNullOrWhiteSpace(finalContent) && completionResult != null)
                                 {
@@ -736,7 +1047,12 @@ namespace AICA.ToolWindows
 
                             case AgentStepType.Error:
                                 // Preserve any tool logs and text accumulated before the error
-                                var errorToolLogs = hasToolCalls ? toolOutputBuilder.ToString() : null;
+                                string errorToolLogs = null;
+                                if (hasToolCalls && toolCallBlocks.Count > 0)
+                                {
+                                    errorToolLogs = BuildInterleavedToolLogsHtml(toolCallBlocks);
+                                }
+
                                 var errorContent = responseBuilder.ToString().Trim();
                                 var errorMessage = $"❌ Agent Error: {step.ErrorMessage}";
 
@@ -906,7 +1222,7 @@ namespace AICA.ToolWindows
         private bool ContainsToolIntentLanguage(string text)
         {
             if (string.IsNullOrEmpty(text)) return false;
-            
+
             // Detect phrases that indicate the AI intended to use tools but didn't
             var intentPhrases = new[]
             {
@@ -915,7 +1231,7 @@ namespace AICA.ToolWindows
                 "let me", "i will", "i'll", "let's",
                 "read the file", "list the", "check the"
             };
-            
+
             var lowerText = text.ToLowerInvariant();
             foreach (var phrase in intentPhrases)
             {
@@ -925,43 +1241,305 @@ namespace AICA.ToolWindows
             return false;
         }
 
+        /// <summary>
+        /// Get current project path from Visual Studio
+        /// </summary>
+        private string GetCurrentProjectPath()
+        {
+            try
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+
+                // 优先使用解决方案路径
+                if (_dte?.Solution?.FullName != null && !string.IsNullOrEmpty(_dte.Solution.FullName))
+                {
+                    return System.IO.Path.GetDirectoryName(_dte.Solution.FullName);
+                }
+
+                // 回退到工作目录
+                return _agentContext?.WorkingDirectory;
+            }
+            catch
+            {
+                return _agentContext?.WorkingDirectory;
+            }
+        }
+
+        /// <summary>
+        /// Get project name from project path
+        /// </summary>
+        private string GetProjectName(string projectPath)
+        {
+            if (string.IsNullOrEmpty(projectPath))
+                return null;
+
+            try
+            {
+                return System.IO.Path.GetFileName(projectPath);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Get project name from solution path (extract .sln file name without extension)
+        /// </summary>
+        private string GetProjectNameFromSolutionPath(string solutionPath)
+        {
+            if (string.IsNullOrEmpty(solutionPath))
+                return null;
+
+            try
+            {
+                return System.IO.Path.GetFileNameWithoutExtension(solutionPath);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Find solution name by searching for .sln file in project path
+        /// </summary>
+        private string FindSolutionNameInPath(string projectPath)
+        {
+            if (string.IsNullOrEmpty(projectPath))
+                return null;
+
+            try
+            {
+                // Search for .sln files in the project directory
+                if (System.IO.Directory.Exists(projectPath))
+                {
+                    var slnFiles = System.IO.Directory.GetFiles(projectPath, "*.sln", System.IO.SearchOption.TopDirectoryOnly);
+                    if (slnFiles.Length > 0)
+                    {
+                        var solutionName = System.IO.Path.GetFileNameWithoutExtension(slnFiles[0]);
+                        System.Diagnostics.Debug.WriteLine($"[AICA] Found solution in path: {projectPath} -> {solutionName}");
+                        return solutionName;
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[AICA] No .sln files found in: {projectPath}");
+                    }
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[AICA] Project path does not exist: {projectPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AICA] Error finding solution in path {projectPath}: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Get current solution path from Visual Studio
+        /// </summary>
+        private string GetCurrentSolutionPath()
+        {
+            try
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+                return _dte?.Solution?.FullName;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Get current project name from Visual Studio
+        /// </summary>
+        private string GetCurrentProjectName()
+        {
+            try
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+
+                if (_dte?.Solution?.FullName != null && !string.IsNullOrEmpty(_dte.Solution.FullName))
+                {
+                    return System.IO.Path.GetFileNameWithoutExtension(_dte.Solution.FullName);
+                }
+
+                if (_agentContext?.WorkingDirectory != null)
+                {
+                    return System.IO.Path.GetFileName(_agentContext.WorkingDirectory);
+                }
+
+                return "未命名项目";
+            }
+            catch
+            {
+                return "未命名项目";
+            }
+        }
+
+        private async System.Threading.Tasks.Task LoadConversationAsync(string conversationId)
+        {
+            try
+            {
+                var record = await _conversationStorage.LoadConversationAsync(conversationId);
+                if (record == null)
+                {
+                    System.Windows.MessageBox.Show("无法加载会话，文件可能已损坏", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                // Save current conversation before switching (only if it's different)
+                if (_conversation.Count > 0 && _currentConversationId != conversationId)
+                {
+                    await SaveConversationAsync();
+                }
+
+                // Clear current conversation
+                _conversation.Clear();
+                _llmHistory.Clear();
+
+                // Restore messages
+                foreach (var msg in record.Messages)
+                {
+                    _conversation.Add(new ConversationMessage
+                    {
+                        Role = msg.Role,
+                        Content = msg.Content,
+                        ToolLogsHtml = msg.ToolLogsHtml,
+                        CompletionData = msg.CompletionData
+                    });
+
+                    // Restore to LLM history (for context)
+                    if (msg.Role == "user")
+                    {
+                        _llmHistory.Add(ChatMessage.User(msg.Content));
+                    }
+                    else if (msg.Role == "assistant")
+                    {
+                        _llmHistory.Add(ChatMessage.Assistant(msg.Content ?? string.Empty));
+                    }
+                }
+
+                // Set current conversation ID
+                _currentConversationId = conversationId;
+
+                // Re-render interface
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                RenderConversation();
+
+                System.Diagnostics.Debug.WriteLine($"[AICA] Loaded conversation {conversationId} with {record.Messages.Count} messages");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AICA] Failed to load conversation: {ex.Message}");
+                System.Windows.MessageBox.Show($"加载会话失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         private async System.Threading.Tasks.Task SaveConversationAsync()
         {
             try
             {
                 if (_conversation.Count == 0) return;
 
-                var record = new ConversationRecord
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                bool isNewConversation = _currentConversationId == null;
+
+                ConversationRecord record;
+
+                if (isNewConversation)
                 {
-                    Id = _currentConversationId ?? Guid.NewGuid().ToString("N"),
-                    WorkingDirectory = _agentContext?.WorkingDirectory,
-                    Messages = new List<ConversationMessageRecord>()
-                };
+                    // New conversation: create with current project info
+                    record = new ConversationRecord
+                    {
+                        Id = null, // Will be generated
+                        WorkingDirectory = _agentContext?.WorkingDirectory,
+                        ProjectPath = GetCurrentProjectPath(),
+                        ProjectName = GetCurrentProjectName(),
+                        SolutionPath = GetCurrentSolutionPath(),
+                        CreatedAt = DateTimeOffset.UtcNow,
+                        Messages = new List<ConversationMessageRecord>()
+                    };
+                }
+                else
+                {
+                    // Existing conversation: load and preserve original project info
+                    record = await _conversationStorage.LoadConversationAsync(_currentConversationId);
+                    if (record == null)
+                    {
+                        // Conversation file was deleted, treat as new
+                        record = new ConversationRecord
+                        {
+                            Id = _currentConversationId,
+                            WorkingDirectory = _agentContext?.WorkingDirectory,
+                            ProjectPath = GetCurrentProjectPath(),
+                            ProjectName = GetCurrentProjectName(),
+                            SolutionPath = GetCurrentSolutionPath(),
+                            CreatedAt = DateTimeOffset.UtcNow,
+                            Messages = new List<ConversationMessageRecord>()
+                        };
+                    }
+                    else
+                    {
+                        // Clear messages to rebuild from current conversation
+                        record.Messages.Clear();
+                    }
+                }
 
                 // Set title from first user message
                 foreach (var msg in _conversation)
                 {
                     if (msg.Role == "user" && string.IsNullOrEmpty(record.Title))
                     {
-                        record.Title = msg.Content.Length > 50
-                            ? msg.Content.Substring(0, 47) + "..."
-                            : msg.Content;
+                        // 改进标题生成：只取第一行，最多50字符
+                        var firstLine = msg.Content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? msg.Content;
+                        record.Title = firstLine.Length > 50
+                            ? firstLine.Substring(0, 47) + "..."
+                            : firstLine;
                     }
 
                     record.Messages.Add(new ConversationMessageRecord
                     {
                         Role = msg.Role,
-                        Content = msg.Content
+                        Content = msg.Content,
+                        ToolLogsHtml = msg.ToolLogsHtml,
+                        CompletionData = msg.CompletionData
                     });
                 }
 
-                if (_currentConversationId == null)
+                await _conversationStorage.SaveConversationAsync(record);
+
+                // Update current conversation ID if it was new
+                if (isNewConversation)
                 {
                     _currentConversationId = record.Id;
-                    record.CreatedAt = DateTimeOffset.UtcNow;
                 }
 
-                await _conversationStorage.SaveConversationAsync(record);
+                // If this is a new conversation and sidebar is open, add it to the list
+                if (isNewConversation && _isSidebarOpen)
+                {
+                    var newViewModel = new ConversationViewModel
+                    {
+                        Id = record.Id,
+                        Title = record.Title ?? "未命名会话",
+                        TimeAgo = "刚刚",
+                        UpdatedAt = record.UpdatedAt,
+                        ProjectName = record.ProjectName
+                    };
+
+                    _allConversations.Insert(0, newViewModel);
+                    ConversationListBox.ItemsSource = null;
+                    ConversationListBox.ItemsSource = _allConversations;
+                    ConversationListBox.SelectedItem = newViewModel;
+
+                    System.Diagnostics.Debug.WriteLine($"[AICA] New conversation added to list: {record.Id}");
+                }
 
                 // Periodic cleanup
                 if (_conversation.Count % 20 == 0)
@@ -976,6 +1554,282 @@ namespace AICA.ToolWindows
         private void ClearButton_Click(object sender, RoutedEventArgs e)
         {
             ClearConversation();
+        }
+
+        private async void HistoryButton_Click(object sender, RoutedEventArgs e)
+        {
+            _isSidebarOpen = !_isSidebarOpen;
+            await ToggleSidebarAsync();
+        }
+
+        private async System.Threading.Tasks.Task ToggleSidebarAsync()
+        {
+            System.Diagnostics.Debug.WriteLine($"[AICA] ToggleSidebarAsync called, _isSidebarOpen={_isSidebarOpen}");
+
+            if (_isSidebarOpen)
+            {
+                // Check if project has switched
+                var currentProjectPath = GetCurrentProjectPath();
+                System.Diagnostics.Debug.WriteLine($"[AICA] Opening sidebar, currentProjectPath={currentProjectPath}, _lastProjectPath={_lastProjectPath}");
+
+                if (_lastProjectPath != null && _lastProjectPath != currentProjectPath)
+                {
+                    // Project switched - save current conversation and clear
+                    await SaveConversationAsync();
+                    ClearConversation();
+                    System.Diagnostics.Debug.WriteLine($"[AICA] Project switched from {_lastProjectPath} to {currentProjectPath}");
+                }
+                _lastProjectPath = currentProjectPath;
+
+                // Load conversations when opening
+                System.Diagnostics.Debug.WriteLine($"[AICA] About to call LoadConversationListAsync");
+                await LoadConversationListAsync();
+                System.Diagnostics.Debug.WriteLine($"[AICA] LoadConversationListAsync completed");
+
+                // Animate sidebar opening
+                var animation = new System.Windows.Media.Animation.DoubleAnimation
+                {
+                    From = 0,
+                    To = 250,
+                    Duration = TimeSpan.FromMilliseconds(300),
+                    EasingFunction = new System.Windows.Media.Animation.CubicEase { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut }
+                };
+                HistorySidebar.BeginAnimation(System.Windows.Controls.Border.WidthProperty, animation);
+            }
+            else
+            {
+                // Animate sidebar closing
+                var animation = new System.Windows.Media.Animation.DoubleAnimation
+                {
+                    From = 250,
+                    To = 0,
+                    Duration = TimeSpan.FromMilliseconds(300),
+                    EasingFunction = new System.Windows.Media.Animation.CubicEase { EasingMode = System.Windows.Media.Animation.EasingMode.EaseIn }
+                };
+                HistorySidebar.BeginAnimation(System.Windows.Controls.Border.WidthProperty, animation);
+            }
+        }
+
+        private async System.Threading.Tasks.Task LoadConversationListAsync()
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"[AICA] LoadConversationListAsync started");
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                var projectPath = GetCurrentProjectPath();
+                System.Diagnostics.Debug.WriteLine($"[AICA] Current project path: {projectPath}");
+
+                var summaries = await _conversationStorage.ListConversationsForProjectAsync(projectPath, 50);
+                System.Diagnostics.Debug.WriteLine($"[AICA] Loaded {summaries.Count} conversation summaries");
+
+                _allConversations = summaries.Select(s =>
+                {
+                    var solutionName = GetProjectNameFromSolutionPath(s.SolutionPath);
+                    var foundName = solutionName ?? FindSolutionNameInPath(s.ProjectPath);
+                    var finalName = foundName ?? s.ProjectName;
+
+                    System.Diagnostics.Debug.WriteLine($"[AICA] Conversation {s.Id}: solutionPath={s.SolutionPath}, projectPath={s.ProjectPath}, solutionName={solutionName}, foundName={foundName}, finalName={finalName}");
+
+                    return new ConversationViewModel
+                    {
+                        Id = s.Id,
+                        Title = s.Title ?? "未命名会话",
+                        TimeAgo = GetTimeAgo(s.UpdatedAt),
+                        UpdatedAt = s.UpdatedAt,
+                        ProjectName = finalName
+                    };
+                }).ToList();
+
+                ConversationListBox.ItemsSource = _allConversations;
+
+                // Highlight current conversation
+                if (!string.IsNullOrEmpty(_currentConversationId))
+                {
+                    var currentItem = _allConversations.FirstOrDefault(c => c.Id == _currentConversationId);
+                    if (currentItem != null)
+                    {
+                        ConversationListBox.SelectedItem = currentItem;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AICA] Failed to load conversation list: {ex.Message}");
+            }
+        }
+
+        private string GetTimeAgo(DateTimeOffset time)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var diff = now - time;
+
+            if (diff.TotalMinutes < 1)
+                return "刚刚";
+            if (diff.TotalMinutes < 60)
+                return $"{(int)diff.TotalMinutes}分钟前";
+            if (diff.TotalHours < 24)
+                return $"{(int)diff.TotalHours}小时前";
+            if (diff.TotalDays < 2)
+                return "昨天";
+            if (diff.TotalDays < 7)
+                return $"{(int)diff.TotalDays}天前";
+            if (time.Year == now.Year)
+                return time.ToString("MM-dd");
+            return time.ToString("yyyy-MM-dd");
+        }
+
+        private async void NewConversationButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Save current conversation first
+            await SaveConversationAsync();
+
+            // Clear and start new conversation
+            ClearConversation();
+
+            // Create a new conversation record with "未命名会话" title
+            var projectPath = GetCurrentProjectPath();
+            var projectName = GetProjectName(projectPath);
+            var newConversation = new ConversationRecord
+            {
+                ProjectPath = projectPath,
+                ProjectName = projectName,
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+                Title = "未命名会话",
+                Messages = new List<ConversationMessageRecord>()
+            };
+
+            // Generate ID and save
+            await _conversationStorage.SaveConversationAsync(newConversation);
+            _currentConversationId = newConversation.Id;
+
+            // Add to list immediately
+            var newViewModel = new ConversationViewModel
+            {
+                Id = newConversation.Id,
+                Title = "未命名会话",
+                TimeAgo = "刚刚",
+                UpdatedAt = newConversation.UpdatedAt,
+                ProjectName = projectName // Show project name
+            };
+
+            _allConversations.Insert(0, newViewModel);
+            ConversationListBox.ItemsSource = null;
+            ConversationListBox.ItemsSource = _allConversations;
+            ConversationListBox.SelectedItem = newViewModel;
+
+            System.Diagnostics.Debug.WriteLine($"[AICA] New conversation created: {_currentConversationId}");
+        }
+
+        private async void ConversationListBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (ConversationListBox.SelectedItem is ConversationViewModel selected)
+            {
+                // Don't reload if it's the current conversation
+                if (selected.Id == _currentConversationId)
+                    return;
+
+                await LoadConversationAsync(selected.Id);
+            }
+        }
+
+        private async void DeleteConversationButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.Button button && button.Tag is string conversationId)
+            {
+                var result = System.Windows.MessageBox.Show(
+                    $"确定要删除这个会话吗？此操作无法撤销。",
+                    "确认删除",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    await _conversationStorage.DeleteConversationAsync(conversationId);
+
+                    // If deleting current conversation, create new one
+                    if (conversationId == _currentConversationId)
+                    {
+                        ClearConversation();
+                    }
+
+                    // Reload list
+                    await LoadConversationListAsync();
+                }
+            }
+        }
+
+        private bool _isAllResumeMode = false; // Track if we're in /allresume mode
+
+        private async void SearchTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            var searchText = SearchTextBox.Text?.Trim() ?? string.Empty;
+
+            // Check for /allresume command
+            if (searchText.Equals("/allresume", StringComparison.OrdinalIgnoreCase))
+            {
+                _isAllResumeMode = true;
+                await LoadAllConversationsAsync();
+                return;
+            }
+
+            // If we were in /allresume mode and now search is cleared or changed, reload project conversations
+            if (_isAllResumeMode && string.IsNullOrWhiteSpace(searchText))
+            {
+                _isAllResumeMode = false;
+                await LoadConversationListAsync();
+                return;
+            }
+
+            // If we were in /allresume mode and user types something else, reload project conversations first
+            if (_isAllResumeMode)
+            {
+                _isAllResumeMode = false;
+                await LoadConversationListAsync();
+            }
+
+            // Normal search/filter
+            var searchLower = searchText.ToLowerInvariant();
+
+            if (string.IsNullOrWhiteSpace(searchLower))
+            {
+                ConversationListBox.ItemsSource = _allConversations;
+            }
+            else
+            {
+                var filtered = _allConversations
+                    .Where(c => c.Title.ToLowerInvariant().Contains(searchLower))
+                    .ToList();
+                ConversationListBox.ItemsSource = filtered;
+            }
+        }
+
+        private async System.Threading.Tasks.Task LoadAllConversationsAsync()
+        {
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                var summaries = await _conversationStorage.ListAllConversationsAsync(100);
+
+                _allConversations = summaries.Select(s => new ConversationViewModel
+                {
+                    Id = s.Id,
+                    Title = s.Title ?? "未命名会话",
+                    TimeAgo = GetTimeAgo(s.UpdatedAt),
+                    UpdatedAt = s.UpdatedAt,
+                    ProjectName = s.ProjectName ?? "未知项目"
+                }).ToList();
+
+                ConversationListBox.ItemsSource = _allConversations;
+
+                System.Diagnostics.Debug.WriteLine($"[AICA] Loaded all conversations: {_allConversations.Count} items");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AICA] Failed to load all conversations: {ex.Message}");
+            }
         }
 
         private void SettingsButton_Click(object sender, RoutedEventArgs e)

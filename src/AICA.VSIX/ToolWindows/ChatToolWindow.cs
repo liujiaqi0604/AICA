@@ -5,6 +5,8 @@ using System.Threading.Tasks;
 using System.Windows;
 using Microsoft.VisualStudio.Imaging;
 using Microsoft.VisualStudio.Shell;
+using EnvDTE;
+using EnvDTE80;
 
 namespace AICA.ToolWindows
 {
@@ -12,6 +14,7 @@ namespace AICA.ToolWindows
     public class ChatToolWindow : ToolWindowPane
     {
         private ChatToolWindowControl _control;
+        private DTE2 _dte;
 
         public ChatToolWindow() : base(null)
         {
@@ -24,6 +27,37 @@ namespace AICA.ToolWindows
             base.Initialize();
             _control = new ChatToolWindowControl();
             Content = _control;
+
+            // Subscribe to VS shutdown event
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _dte = (DTE2)GetService(typeof(DTE));
+            if (_dte != null)
+            {
+                _dte.Events.DTEEvents.OnBeginShutdown += OnVSShutdown;
+            }
+        }
+
+        private void OnVSShutdown()
+        {
+            // Save conversation when VS is shutting down
+            ThreadHelper.JoinableTaskFactory.Run(async () =>
+            {
+                await _control?.SaveCurrentConversationAsync();
+            });
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                // Unsubscribe from events
+                ThreadHelper.ThrowIfNotOnUIThread();
+                if (_dte != null)
+                {
+                    _dte.Events.DTEEvents.OnBeginShutdown -= OnVSShutdown;
+                }
+            }
+            base.Dispose(disposing);
         }
 
         public async Task UpdateContentAsync(string content)
