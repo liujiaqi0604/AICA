@@ -300,6 +300,8 @@ namespace AICA.Core.LLM
                 Messages = new List<RequestMessage>(),
                 MaxTokens = _options.MaxTokens,
                 Temperature = _options.Temperature,
+                TopP = _options.TopP,
+                TopK = _options.TopK,
                 Stream = _options.Stream
             };
 
@@ -467,6 +469,10 @@ namespace AICA.Core.LLM
             [JsonPropertyName("max_tokens")]
             public int MaxTokens { get; set; }
             public double Temperature { get; set; }
+            [JsonPropertyName("top_p")]
+            public double TopP { get; set; }
+            [JsonPropertyName("top_k")]
+            public int TopK { get; set; }
             public bool Stream { get; set; }
         }
 

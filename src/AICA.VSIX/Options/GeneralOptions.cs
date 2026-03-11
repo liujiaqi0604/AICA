@@ -41,6 +41,18 @@ namespace AICA.Options
         [DefaultValue(0.7)]
         public double Temperature { get; set; } = 0.7;
 
+        [Category("LLM Configuration")]
+        [DisplayName("Top P")]
+        [Description("Top P (nucleus sampling) for response diversity (0.0 - 1.0). Set to 1 to disable.")]
+        [DefaultValue(1.0)]
+        public double TopP { get; set; } = 1.0;
+
+        [Category("LLM Configuration")]
+        [DisplayName("Top K")]
+        [Description("Top K for limiting token candidates. Set to 0 to disable.")]
+        [DefaultValue(0)]
+        public int TopK { get; set; } = 0;
+
         [Category("Agent Configuration")]
         [DisplayName("Enable Tool Calling")]
         [Description("Enable AI to use tools (read/write files, etc.). Requires LLM server to support function calling. Disable if you see 'tool choice' errors.")]

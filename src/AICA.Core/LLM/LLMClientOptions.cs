@@ -31,6 +31,16 @@ namespace AICA.Core.LLM
         public double Temperature { get; set; } = 0.7;
 
         /// <summary>
+        /// Top P (nucleus sampling) for response diversity (0.0 - 1.0)
+        /// </summary>
+        public double TopP { get; set; } = 1.0;
+
+        /// <summary>
+        /// Top K for limiting token candidates
+        /// </summary>
+        public int TopK { get; set; } = 0;
+
+        /// <summary>
         /// Request timeout in seconds
         /// </summary>
         public int TimeoutSeconds { get; set; } = 120;

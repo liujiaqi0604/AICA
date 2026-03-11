@@ -310,6 +310,8 @@ namespace AICA.ToolWindows
                 Model = options.ModelName,
                 MaxTokens = options.MaxTokens,
                 Temperature = options.Temperature,
+                TopP = options.TopP,
+                TopK = options.TopK,
                 TimeoutSeconds = options.RequestTimeoutSeconds,
                 Stream = true
             };
