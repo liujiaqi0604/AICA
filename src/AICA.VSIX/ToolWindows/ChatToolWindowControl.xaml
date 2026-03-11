@@ -77,7 +77,7 @@
                              AcceptsReturn="True" TextWrapping="Wrap"
                              MaxHeight="120" MinHeight="60"
                              VerticalScrollBarVisibility="Auto"
-                             KeyDown="InputTextBox_KeyDown"
+                             PreviewKeyDown="InputTextBox_PreviewKeyDown"
                              Padding="8"
                              Background="{DynamicResource {x:Static vsshell:VsBrushes.ComboBoxBackgroundKey}}"
                              Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
@@ -86,6 +86,7 @@
                     <Button x:Name="SendButton" Grid.Column="1"
                             Content="Send" Padding="16,8" Margin="8,0,0,0"
                             VerticalAlignment="Bottom"
+                            IsDefault="False"
                             Click="SendButton_Click" />
                 </Grid>
             </Border>

@@ -689,15 +689,44 @@ namespace AICA.ToolWindows
 
         private async void SendButton_Click(object sender, RoutedEventArgs e)
         {
+            if (_isSending)
+            {
+                _currentCts?.Cancel();
+                return;
+            }
             await SendMessageAsync();
         }
 
-        private async void InputTextBox_KeyDown(object sender, KeyEventArgs e)
+        private async void InputTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
+            if (e.Key == Key.Enter)
             {
-                e.Handled = true;
-                await SendMessageAsync();
+                if (Keyboard.Modifiers == ModifierKeys.Shift)
+                {
+                    // Shift+Enter: 手动插入换行符
+                    e.Handled = true;
+                    int caretIndex = InputTextBox.CaretIndex;
+                    InputTextBox.Text = InputTextBox.Text.Insert(caretIndex, "\n");
+                    InputTextBox.CaretIndex = caretIndex + 1;
+                    return;
+                }
+                else
+                {
+                    // Enter: 发送消息（仅当不在发送中时）
+                    e.Handled = true;
+                    
+                    // 如果正在发送，不做任何事（用户必须点击停止按钮）
+                    if (_isSending)
+                    {
+                        return;
+                    }
+                    
+                    var userMessage = InputTextBox.Text.Trim();
+                    if (!string.IsNullOrWhiteSpace(userMessage))
+                    {
+                        await SendMessageAsync();
+                    }
+                }
             }
         }
 
@@ -710,7 +739,7 @@ namespace AICA.ToolWindows
 
             _isSending = true;
             InputTextBox.IsEnabled = false;
-            SendButton.IsEnabled = false;
+            SendButton.Content = "Stop";
             _currentCts = new CancellationTokenSource();
 
             // Check if this is the first message (for title update)
@@ -773,7 +802,7 @@ namespace AICA.ToolWindows
                 _currentCts = null;
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                 InputTextBox.IsEnabled = true;
-                SendButton.IsEnabled = true;
+                SendButton.Content = "Send";
                 InputTextBox.Focus();
             }
         }
