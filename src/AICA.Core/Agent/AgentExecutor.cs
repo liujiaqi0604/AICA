@@ -30,6 +30,18 @@ namespace AICA.Core.Agent
         /// </summary>
         public TaskState CurrentTaskState => _taskState;
 
+        /// <summary>
+        /// Last condense summary produced during execution. UI layer can persist this
+        /// to ConversationRecord.ContextSummary for smarter session resume.
+        /// </summary>
+        public string LastCondenseSummary { get; private set; }
+
+        /// <summary>
+        /// Number of messages in conversation history at the time of last condense.
+        /// UI layer can persist this to ConversationRecord.SummaryUpToIndex.
+        /// </summary>
+        public int CondenseUpToMessageCount { get; private set; }
+
         public AgentExecutor(
             ILLMClient llmClient,
             ToolDispatcher toolDispatcher,
@@ -111,15 +123,42 @@ namespace AICA.Core.Agent
                 // Truncate conversation history if it exceeds token budget
                 // Reserve ~15% of budget for system prompt, use 85% for conversation
                 int conversationBudget = (int)(_maxTokenBudget * 0.85);
+                int currentTokens;
                 if (conversationBudget > 0)
                 {
-                    conversationHistory = ContextManager.TruncateConversation(
+                    var truncateResult = ContextManager.TruncateConversationWithStats(
                         conversationHistory, conversationBudget);
+                    conversationHistory = truncateResult.Messages;
+                    currentTokens = truncateResult.TotalTokens;
+                }
+                else
+                {
+                    currentTokens = conversationHistory.Sum(m => Context.ContextManager.EstimateTokens(m.Content));
                 }
 
                 // ── Safety boundaries: only intervene in truly dangerous situations ──
-                int currentTokens = conversationHistory.Sum(m => Context.ContextManager.EstimateTokens(m.Content));
-                double tokenUsageRatio = (double)currentTokens / conversationBudget;
+                double tokenUsageRatio = (double)currentTokens / Math.Max(1, conversationBudget);
+
+                // ── Proactive condense hint (70%-85% usage) ──
+                // Nudge the LLM to call condense before we hit the safety boundary
+                if (tokenUsageRatio > 0.70 && tokenUsageRatio <= 0.90 && !_taskState.HasCondenseHinted)
+                {
+                    int compressibleMessages = conversationHistory
+                        .Count(m => m.Role != ChatRole.System);
+
+                    if (compressibleMessages >= 5)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[AICA] Token usage at {tokenUsageRatio:P0}, injecting condense hint");
+
+                        conversationHistory.Add(ChatMessage.System(
+                            $"[CONTEXT_PRESSURE] Token usage is at {tokenUsageRatio:P0}. " +
+                            "You should call the `condense` tool to summarize previous work and free up context space. " +
+                            "Include all key findings, files read/modified, and current progress in your summary."));
+
+                        _taskState.HasCondenseHinted = true;
+                    }
+                }
 
                 // Only force completion in extreme edge cases
                 bool forceCompletion = false;
@@ -610,6 +649,10 @@ namespace AICA.Core.Agent
                         var summary = result.Content.Substring("CONDENSE:".Length);
                         System.Diagnostics.Debug.WriteLine($"[AICA] Condensing conversation with summary ({summary.Length} chars)");
 
+                        // Record condense info for UI layer to persist
+                        LastCondenseSummary = summary;
+                        CondenseUpToMessageCount = conversationHistory.Count;
+
                         // Keep system prompt (index 0) and first user message (index 1),
                         // replace everything else with the summary
                         var condensed = new List<ChatMessage>();
@@ -628,10 +671,11 @@ namespace AICA.Core.Agent
 
                     // Add tool result to conversation
                     var resultContent = result.Success ? result.Content : $"Error: {result.Error}";
-                    // Truncate very long results to avoid token overflow
-                    if (resultContent != null && resultContent.Length > 4000)
+                    // Smart truncation: adapt to remaining budget and content type
+                    if (resultContent != null)
                     {
-                        resultContent = resultContent.Substring(0, 4000) + "\n... (truncated, total length: " + resultContent.Length + " chars)";
+                        int remainingBudget = Math.Max(1000, conversationBudget - conversationHistory.Sum(m => Context.ContextManager.EstimateTokens(m.Content)));
+                        resultContent = Context.ContextManager.SmartTruncateToolResult(resultContent, toolCall.Name, remainingBudget);
                     }
                     conversationHistory.Add(ChatMessage.ToolResult(toolCall.Id, resultContent));
 
