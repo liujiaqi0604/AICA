@@ -47,6 +47,9 @@ namespace AICA.Core.Agent
         public int UserCancellationCount { get; set; }
         public const int MaxUserCancellations = 3;
 
+        // Context pressure tracking
+        public bool HasCondenseHinted { get; set; }
+
         /// <summary>
         /// Reset failure counters after a successful step.
         /// </summary>

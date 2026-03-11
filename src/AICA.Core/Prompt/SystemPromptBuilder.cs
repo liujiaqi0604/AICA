@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using AICA.Core.Agent;
+using AICA.Core.Context;
 
 namespace AICA.Core.Prompt
 {
@@ -330,6 +331,122 @@ namespace AICA.Core.Prompt
         }
 
         /// <summary>
+        /// Build system prompt sections with priority tags. Each section can be independently
+        /// managed by ContextManager to shed low-priority content under token pressure.
+        /// </summary>
+        public List<PromptSection> BuildSections(
+            string workingDirectory,
+            IEnumerable<string> sourceRoots = null,
+            string customInstructions = null)
+        {
+            var sections = new List<PromptSection>();
+
+            // Base role — always required
+            var baseSb = new StringBuilder();
+            baseSb.AppendLine("You are AICA (AI Coding Assistant), an intelligent programming assistant running inside Visual Studio 2022.");
+            baseSb.AppendLine("You help developers with code generation, editing, refactoring, testing, debugging, and code understanding.");
+            baseSb.AppendLine("You operate primarily in an offline/private environment. Do not assume internet access.");
+            baseSb.AppendLine();
+            baseSb.AppendLine("## CRITICAL: Focus on Current Request");
+            baseSb.AppendLine("- **ALWAYS respond to the MOST RECENT user message**, not previous messages in the conversation history.");
+            baseSb.AppendLine("- The conversation history is provided for context, but your PRIMARY task is to address the LATEST user request.");
+            baseSb.AppendLine("- If the latest request is completely different from previous requests, switch tasks immediately.");
+            sections.Add(new PromptSection("base_role", baseSb.ToString(), ContextPriority.Critical, 0));
+
+            // Tool descriptions — always required for function calling
+            if (_tools.Count > 0)
+            {
+                var toolSb = new StringBuilder();
+                toolSb.AppendLine("## Available Tools");
+                toolSb.AppendLine();
+                toolSb.AppendLine("You have access to the following tools via the OpenAI function calling API.");
+                toolSb.AppendLine("When you need to perform an action, use the tool_calls mechanism — do NOT write out tool calls as text or XML.");
+                toolSb.AppendLine("IMPORTANT: Call tools IMMEDIATELY when needed. Do not describe what you would do — just call the tool directly.");
+                toolSb.AppendLine();
+                foreach (var tool in _tools)
+                {
+                    toolSb.AppendLine($"### {tool.Name}");
+                    toolSb.AppendLine(tool.Description);
+                    if (tool.Parameters?.Properties != null && tool.Parameters.Properties.Count > 0)
+                    {
+                        toolSb.AppendLine("Parameters:");
+                        foreach (var param in tool.Parameters.Properties)
+                        {
+                            var required = tool.Parameters.Required != null &&
+                                           tool.Parameters.Required.Contains(param.Key) ? " (required)" : " (optional)";
+                            toolSb.AppendLine($"  - `{param.Key}` ({param.Value.Type}){required}: {param.Value.Description}");
+                        }
+                    }
+                    toolSb.AppendLine();
+                }
+                sections.Add(new PromptSection("tool_descriptions", toolSb.ToString(), ContextPriority.Critical, 1));
+            }
+
+            // Workspace context — high priority, needed for path resolution
+            var wsSb = new StringBuilder();
+            wsSb.AppendLine("## Workspace");
+            wsSb.AppendLine($"Working Directory: {workingDirectory}");
+            if (sourceRoots != null)
+            {
+                var rootList = sourceRoots.ToList();
+                if (rootList.Count > 0)
+                {
+                    wsSb.AppendLine();
+                    wsSb.AppendLine("### Source Roots");
+                    foreach (var root in rootList) wsSb.AppendLine($"- {root}");
+                }
+            }
+            sections.Add(new PromptSection("workspace", wsSb.ToString(), ContextPriority.High, 2));
+
+            // Custom instructions — high priority, user-specified
+            if (!string.IsNullOrWhiteSpace(customInstructions))
+            {
+                sections.Add(new PromptSection("custom_instructions",
+                    "## Custom Instructions\n" + customInstructions, ContextPriority.High, 3));
+            }
+
+            return sections;
+        }
+
+        /// <summary>
+        /// Build a system prompt that fits within a token budget by shedding low-priority sections.
+        /// Falls back to full Build() if budget is generous enough.
+        /// </summary>
+        public static string BuildWithBudget(
+            string workingDirectory,
+            IEnumerable<ToolDefinition> tools,
+            int tokenBudget,
+            string customInstructions = null,
+            IEnumerable<string> sourceRoots = null)
+        {
+            // First try the full prompt
+            var fullPrompt = GetDefaultPrompt(workingDirectory, tools, customInstructions, sourceRoots);
+            if (ContextManager.EstimateTokens(fullPrompt) <= tokenBudget)
+                return fullPrompt;
+
+            // Under pressure: use sectioned approach with ContextManager
+            var builder = new SystemPromptBuilder();
+            builder.AddTools(tools);
+            var sections = builder.BuildSections(workingDirectory, sourceRoots, customInstructions);
+
+            var cm = new ContextManager(tokenBudget);
+            foreach (var section in sections)
+            {
+                cm.AddItem(section.Key, section.Content, section.Priority);
+            }
+
+            var items = cm.GetContextWithinBudget();
+            // Reassemble in original order
+            var ordered = items.OrderBy(i =>
+            {
+                var match = sections.FirstOrDefault(s => s.Key == i.Key);
+                return match?.Order ?? 99;
+            });
+
+            return string.Join("\n\n", ordered.Select(i => i.Content));
+        }
+
+        /// <summary>
         /// Get the default system prompt with full tool descriptions and rules
         /// </summary>
         public static string GetDefaultPrompt(
@@ -345,6 +462,25 @@ namespace AICA.Core.Prompt
                 .AddWorkspaceContext(workingDirectory, sourceRoots)
                 .AddCustomInstructions(customInstructions)
                 .Build();
+        }
+    }
+
+    /// <summary>
+    /// A section of the system prompt with priority metadata.
+    /// </summary>
+    public class PromptSection
+    {
+        public string Key { get; }
+        public string Content { get; }
+        public ContextPriority Priority { get; }
+        public int Order { get; }
+
+        public PromptSection(string key, string content, ContextPriority priority, int order)
+        {
+            Key = key;
+            Content = content;
+            Priority = priority;
+            Order = order;
         }
     }
 }

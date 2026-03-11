@@ -303,6 +303,67 @@ namespace AICA.Core.Storage
             if (string.IsNullOrEmpty(text) || text.Length <= maxLen) return text ?? "";
             return text.Substring(0, maxLen) + "...";
         }
+
+        /// <summary>
+        /// Build resume messages from a conversation record, using context summary if available
+        /// to avoid immediate token overflow on long conversations.
+        /// </summary>
+        /// <param name="record">The conversation record to resume from</param>
+        /// <param name="tokenBudget">Maximum token budget for the resumed conversation</param>
+        /// <returns>List of ChatMessage suitable for passing as previousMessages to AgentExecutor</returns>
+        public static List<LLM.ChatMessage> BuildResumeMessages(ConversationRecord record, int tokenBudget)
+        {
+            if (record == null || record.Messages == null || record.Messages.Count == 0)
+                return new List<LLM.ChatMessage>();
+
+            var messages = new List<LLM.ChatMessage>();
+
+            if (!string.IsNullOrEmpty(record.ContextSummary) && record.SummaryUpToIndex > 0)
+            {
+                // Has summary: inject it, then load only messages after the summary point
+                messages.Add(LLM.ChatMessage.System(
+                    "[Resumed conversation] Summary of previous work:\n" + record.ContextSummary));
+
+                int startIndex = Math.Min(record.SummaryUpToIndex, record.Messages.Count);
+                for (int i = startIndex; i < record.Messages.Count; i++)
+                {
+                    var msg = ConvertToChat(record.Messages[i]);
+                    if (msg != null) messages.Add(msg);
+                }
+            }
+            else
+            {
+                // No summary: load all messages, rely on TruncateConversation to fit budget
+                foreach (var msg in record.Messages)
+                {
+                    var chat = ConvertToChat(msg);
+                    if (chat != null) messages.Add(chat);
+                }
+
+                messages = Context.ContextManager.TruncateConversation(messages, tokenBudget);
+            }
+
+            return messages;
+        }
+
+        private static LLM.ChatMessage ConvertToChat(ConversationMessageRecord record)
+        {
+            if (record == null) return null;
+
+            switch (record.Role?.ToLowerInvariant())
+            {
+                case "user":
+                    return LLM.ChatMessage.User(record.Content ?? string.Empty);
+                case "assistant":
+                    return LLM.ChatMessage.Assistant(record.Content ?? string.Empty);
+                case "tool":
+                    return LLM.ChatMessage.ToolResult(null, record.Content ?? string.Empty);
+                case "system":
+                    return LLM.ChatMessage.System(record.Content ?? string.Empty);
+                default:
+                    return null;
+            }
+        }
     }
 
     /// <summary>
@@ -322,6 +383,18 @@ namespace AICA.Core.Storage
         public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
         public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
         public List<ConversationMessageRecord> Messages { get; set; } = new List<ConversationMessageRecord>();
+
+        /// <summary>
+        /// Context summary from condense operations. When present, resume can use this
+        /// instead of loading all messages, avoiding immediate context overflow.
+        /// </summary>
+        public string ContextSummary { get; set; }
+
+        /// <summary>
+        /// Index up to which ContextSummary covers. Messages before this index
+        /// are represented by the summary; messages from this index onward are loaded normally.
+        /// </summary>
+        public int SummaryUpToIndex { get; set; }
     }
 
     /// <summary>
