@@ -826,7 +826,7 @@ namespace AICA.ToolWindows
         /// <summary>
         /// View model for conversation list item
         /// </summary>
-        private class ConversationViewModel : System.ComponentModel.INotifyPropertyChanged
+        internal class ConversationViewModel : System.ComponentModel.INotifyPropertyChanged
         {
             private string _title;
 
@@ -1340,6 +1340,28 @@ namespace AICA.ToolWindows
         }
 
         /// <summary>
+        /// Find .sln file full path in a directory
+        /// </summary>
+        private string FindSolutionFileInPath(string projectPath)
+        {
+            if (string.IsNullOrEmpty(projectPath))
+                return null;
+
+            try
+            {
+                if (System.IO.Directory.Exists(projectPath))
+                {
+                    var slnFiles = System.IO.Directory.GetFiles(projectPath, "*.sln", System.IO.SearchOption.TopDirectoryOnly);
+                    if (slnFiles.Length > 0)
+                        return slnFiles[0];
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        /// <summary>
         /// Get current solution path from Visual Studio
         /// </summary>
         private string GetCurrentSolutionPath()
@@ -1347,10 +1369,15 @@ namespace AICA.ToolWindows
             try
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
-                return _dte?.Solution?.FullName;
+                var fullName = _dte?.Solution?.FullName;
+                System.Diagnostics.Debug.WriteLine($"[AICA] GetCurrentSolutionPath: _dte={(_dte != null)}, Solution={(_dte?.Solution != null)}, FullName='{fullName}'");
+                if (string.IsNullOrEmpty(fullName))
+                    return null;
+                return fullName;
             }
-            catch
+            catch (Exception ex)
             {
+                System.Diagnostics.Debug.WriteLine($"[AICA] GetCurrentSolutionPath exception: {ex.Message}");
                 return null;
             }
         }
@@ -1364,11 +1391,21 @@ namespace AICA.ToolWindows
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
 
+                // 1. Try from DTE Solution
                 if (_dte?.Solution?.FullName != null && !string.IsNullOrEmpty(_dte.Solution.FullName))
                 {
                     return System.IO.Path.GetFileNameWithoutExtension(_dte.Solution.FullName);
                 }
 
+                // 2. Try finding .sln in project path
+                var projectPath = GetCurrentProjectPath();
+                var slnName = FindSolutionNameInPath(projectPath);
+                if (slnName != null)
+                {
+                    return slnName;
+                }
+
+                // 3. Fallback to directory name
                 if (_agentContext?.WorkingDirectory != null)
                 {
                     return System.IO.Path.GetFileName(_agentContext.WorkingDirectory);
@@ -1489,6 +1526,26 @@ namespace AICA.ToolWindows
                     {
                         // Clear messages to rebuild from current conversation
                         record.Messages.Clear();
+
+                        // Fix missing SolutionPath/ProjectName for old records
+                        if (string.IsNullOrEmpty(record.SolutionPath))
+                        {
+                            record.SolutionPath = GetCurrentSolutionPath();
+                        }
+                        if (string.IsNullOrEmpty(record.SolutionPath))
+                        {
+                            // Try to find .sln in project path
+                            var slnPath = FindSolutionFileInPath(record.ProjectPath);
+                            if (slnPath != null)
+                            {
+                                record.SolutionPath = slnPath;
+                            }
+                        }
+                        // Always update ProjectName from SolutionPath if available
+                        if (!string.IsNullOrEmpty(record.SolutionPath))
+                        {
+                            record.ProjectName = System.IO.Path.GetFileNameWithoutExtension(record.SolutionPath);
+                        }
                     }
                 }
 
@@ -1524,13 +1581,18 @@ namespace AICA.ToolWindows
                 // If this is a new conversation and sidebar is open, add it to the list
                 if (isNewConversation && _isSidebarOpen)
                 {
+                    // Use fallback logic for display name
+                    var displayName = GetProjectNameFromSolutionPath(record.SolutionPath)
+                        ?? FindSolutionNameInPath(record.ProjectPath)
+                        ?? record.ProjectName;
+
                     var newViewModel = new ConversationViewModel
                     {
                         Id = record.Id,
                         Title = record.Title ?? "未命名会话",
                         TimeAgo = "刚刚",
                         UpdatedAt = record.UpdatedAt,
-                        ProjectName = record.ProjectName
+                        ProjectName = displayName
                     };
 
                     _allConversations.Insert(0, newViewModel);
@@ -1642,6 +1704,7 @@ namespace AICA.ToolWindows
                 }).ToList();
 
                 ConversationListBox.ItemsSource = _allConversations;
+                System.Diagnostics.Debug.WriteLine($"[AICA] ConversationListBox.ItemsSource set, count={_allConversations.Count}, ListBox.Items.Count={ConversationListBox.Items.Count}");
 
                 // Highlight current conversation
                 if (!string.IsNullOrEmpty(_currentConversationId))
@@ -1689,11 +1752,13 @@ namespace AICA.ToolWindows
 
             // Create a new conversation record with "未命名会话" title
             var projectPath = GetCurrentProjectPath();
-            var projectName = GetProjectName(projectPath);
+            var projectName = GetCurrentProjectName();
+            var solutionPath = GetCurrentSolutionPath();
             var newConversation = new ConversationRecord
             {
                 ProjectPath = projectPath,
                 ProjectName = projectName,
+                SolutionPath = solutionPath,
                 CreatedAt = DateTimeOffset.UtcNow,
                 UpdatedAt = DateTimeOffset.UtcNow,
                 Title = "未命名会话",
@@ -1704,14 +1769,18 @@ namespace AICA.ToolWindows
             await _conversationStorage.SaveConversationAsync(newConversation);
             _currentConversationId = newConversation.Id;
 
-            // Add to list immediately
+            // Add to list immediately - use fallback logic for display name
+            var displayName = GetProjectNameFromSolutionPath(solutionPath)
+                ?? FindSolutionNameInPath(projectPath)
+                ?? projectName;
+
             var newViewModel = new ConversationViewModel
             {
                 Id = newConversation.Id,
                 Title = "未命名会话",
                 TimeAgo = "刚刚",
                 UpdatedAt = newConversation.UpdatedAt,
-                ProjectName = projectName // Show project name
+                ProjectName = displayName
             };
 
             _allConversations.Insert(0, newViewModel);
@@ -1819,7 +1888,10 @@ namespace AICA.ToolWindows
                     Title = s.Title ?? "未命名会话",
                     TimeAgo = GetTimeAgo(s.UpdatedAt),
                     UpdatedAt = s.UpdatedAt,
-                    ProjectName = s.ProjectName ?? "未知项目"
+                    ProjectName = GetProjectNameFromSolutionPath(s.SolutionPath)
+                        ?? FindSolutionNameInPath(s.ProjectPath)
+                        ?? s.ProjectName
+                        ?? "未知项目"
                 }).ToList();
 
                 ConversationListBox.ItemsSource = _allConversations;
